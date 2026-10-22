@@ -1,0 +1,151 @@
+{
+  "info": {
+    "_postman_id": "c86e07a3-5c56-4cf3-96b0-7ef62f0394e1",
+    "name": "Grovastra API - Phase 1 Foundation",
+    "description": "Postman test suite for Grovastra Phase 1 architecture verification, including API liveness, dependency readiness, and standardized 404 error handling.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health / Liveness Probe",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status code is 200 OK\", function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test(\"Response has success boolean and healthy status\", function () {",
+              "    var jsonData = pm.response.json();",
+              "    pm.expect(jsonData.success).to.eql(true);",
+              "    pm.expect(jsonData.data.status).to.eql(\"healthy\");",
+              "    pm.expect(jsonData.data.service).to.eql(\"grovastra-backend\");",
+              "    pm.expect(jsonData.data).to.have.property(\"uptime\");",
+              "    pm.expect(jsonData.data).to.have.property(\"timestamp\");",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        },
+        "description": "Checks the Node.js Express server process liveness without requiring database or Redis connectivity."
+      },
+      "response": []
+    },
+    {
+      "name": "Readiness / Dependency Probe",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status code is 200 or 503\", function () {",
+              "    pm.expect(pm.response.code).to.be.oneOf([200, 503]);",
+              "});",
+              "",
+              "pm.test(\"Response reports honest dependency diagnostic breakdown\", function () {",
+              "    var jsonData = pm.response.json();",
+              "    pm.expect(jsonData.success).to.eql(true);",
+              "    pm.expect(jsonData.data).to.have.property(\"dependencies\");",
+              "    pm.expect(jsonData.data.dependencies).to.have.property(\"database\");",
+              "    pm.expect(jsonData.data.dependencies).to.have.property(\"redis\");",
+              "    pm.expect([\"ready\", \"degraded\", \"not_ready\"]).to.include(jsonData.data.status);",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/ready",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "ready"
+          ]
+        },
+        "description": "Checks external dependency connectivity (Supabase PostgreSQL and Upstash Redis) and honestly reports connection status."
+      },
+      "response": []
+    },
+    {
+      "name": "Unknown Route / 404 Handler",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test(\"Status code is 404 Not Found\", function () {",
+              "    pm.response.to.have.status(404);",
+              "});",
+              "",
+              "pm.test(\"Response conforms to standard JSON error format\", function () {",
+              "    var jsonData = pm.response.json();",
+              "    pm.expect(jsonData.success).to.eql(false);",
+              "    pm.expect(jsonData.error).to.have.property(\"code\", \"NOT_FOUND\");",
+              "    pm.expect(jsonData.error).to.have.property(\"message\");",
+              "    pm.expect(jsonData).to.have.property(\"timestamp\");",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/unknown-test-endpoint",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "unknown-test-endpoint"
+          ]
+        },
+        "description": "Verifies that non-existent routes return HTTP 404 with standardized JSON error formatting."
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000/api/v1",
+      "type": "string"
+    }
+  ]
+}

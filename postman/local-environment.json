@@ -1,0 +1,13 @@
+{
+  "id": "e4277a83-a49d-4cf0-b384-93e117496be1",
+  "name": "Grovastra Local Environment",
+  "values": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000/api/v1",
+      "type": "default",
+      "enabled": true
+    }
+  ],
+  "_postman_variable_scope": "environment"
+}

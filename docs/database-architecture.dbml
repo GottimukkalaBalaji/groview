@@ -1,0 +1,504 @@
+// ==============================================================================
+// GROVASTRA DATABASE ARCHITECTURE (DBML v2)
+// Multi-Tenant WhatsApp Marketing & Broadcast Automation Platform
+// Compatible with: dbdiagram.io (Direct copy & paste)
+// Inferred from & Verified against: live Supabase PostgreSQL + backend/prisma/schema.prisma
+// Generated on: 2026-10-21
+// ==============================================================================
+
+Project Grovastra {
+  database_type: 'PostgreSQL'
+  Note: '''
+    # Grovastra Database Architecture
+    Enterprise-grade multi-tenant broadcast orchestration platform.
+    Key characteristics:
+    - Strict organization-scoped tenant isolation (composite FKs enforce boundary integrity).
+    - Idempotent campaign dispatch and CSV contact ingestion.
+    - Full Meta WhatsApp Cloud API compliance and webhook status reconciliation.
+  '''
+}
+
+// ==============================================================================
+// 1. ENUMS (10 Definitions)
+// ==============================================================================
+
+Enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  QUEUED
+  SENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+Enum AudienceType {
+  MOCK
+  CONTACT_LIST
+  SEGMENT
+}
+
+Enum ConsentStatus {
+  OPTED_IN
+  OPTED_OUT
+  PENDING
+  UNKNOWN
+}
+
+Enum ConsentEventType {
+  OPT_IN
+  OPT_OUT
+  SUPPRESS
+  UNSUPPRESS
+}
+
+Enum ImportJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  FAILED
+}
+
+Enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+Enum PlatformRole {
+  NONE
+  PLATFORM_MASTER_ADMIN
+  DELEGATED_ADMIN
+}
+
+Enum MessageDeliveryStatus {
+  QUEUED
+  SENDING
+  SUBMITTED_UNCONFIRMED
+  ACCEPTED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+Enum MetaConnectionStatus {
+  NOT_CONNECTED
+  PENDING_VERIFICATION
+  CONNECTED
+  TOKEN_EXPIRED
+  DISCONNECTED
+  REVOKED
+}
+
+Enum AssignmentStatus {
+  ACTIVE
+  REVOKED
+}
+
+// ==============================================================================
+// 2. CORE & MULTI-TENANCY TABLES
+// ==============================================================================
+
+Table system_meta {
+  id text [pk, not null, note: 'System metadata identifier (CUID)']
+  key text [unique, not null, note: 'Configuration key']
+  value text [not null, note: 'Configuration value']
+  createdAt timestamp [not null, default: `now()`, note: 'Record creation timestamp']
+  updatedAt timestamp [not null, note: 'Record update timestamp']
+
+  indexes {
+    key [unique, name: 'system_meta_key_key']
+  }
+
+  Note: 'Minimal initial key-value table for system configuration and Phase 1 verification.'
+}
+
+Table organizations {
+  id text [pk, not null, note: 'Tenant organization unique identifier (CUID)']
+  name text [not null, note: 'Tenant organization legal or display name']
+  slug text [unique, not null, note: 'Unique URL-safe organization slug']
+  isArchived boolean [not null, default: false, note: 'Soft archival flag']
+  deletedAt timestamp [null, note: 'Soft deletion timestamp']
+  createdAt timestamp [not null, default: `now()`, note: 'Organization creation timestamp']
+  updatedAt timestamp [not null, note: 'Organization profile update timestamp']
+
+  indexes {
+    slug [unique, name: 'organizations_slug_key']
+  }
+
+  Note: 'Primary tenant boundary entity. All tenant-scoped resources cascade or restrict to this organization.'
+}
+
+Table users {
+  id text [pk, not null, note: 'User identifier (CUID)']
+  organizationId text [not null, note: 'Tenant organization FK']
+  email varchar(255) [unique, not null, note: 'Normalized user email address']
+  passwordHash varchar(255) [not null, note: 'Bcrypt hashed user password']
+  firstName varchar(100) [not null, note: 'User first name']
+  lastName varchar(100) [null, note: 'User last name']
+  role UserRole [not null, default: 'OWNER', note: 'Tenant-level role: OWNER, ADMIN, MEMBER']
+  platformRole PlatformRole [not null, default: 'NONE', note: 'Cross-tenant platform role: NONE, PLATFORM_MASTER_ADMIN, DELEGATED_ADMIN']
+  createdAt timestamp [not null, default: `now()`, note: 'User account creation timestamp']
+  updatedAt timestamp [not null, note: 'User account update timestamp']
+
+  indexes {
+    email [unique, name: 'users_email_key']
+    `lower(email)` [unique, name: 'users_email_lower_idx']
+    (organizationId, id) [unique, name: 'users_organizationId_id_key']
+    organizationId [name: 'users_organizationId_idx']
+  }
+
+  Note: 'Authenticated user accounts scoped to a primary organization with optional platform-wide administration capabilities.'
+}
+
+Table sessions {
+  id text [pk, not null, note: 'Session identifier (CUID)']
+  userId text [not null, note: 'FK to authenticated user']
+  organizationId text [not null, note: 'FK to tenant organization']
+  tokenHash varchar(64) [unique, not null, note: 'Cryptographic SHA-256 hash of client session bearer token']
+  expiresAt timestamp [not null, note: 'Session absolute expiration timestamp']
+  createdAt timestamp [not null, default: `now()`, note: 'Session issuance timestamp']
+  userAgent varchar(500) [null, note: 'Client browser / user-agent string']
+  ipAddress varchar(45) [null, note: 'Client IP address (IPv4 or IPv6)']
+
+  indexes {
+    tokenHash [unique, name: 'sessions_tokenHash_key']
+    userId [name: 'sessions_userId_idx']
+    organizationId [name: 'sessions_organizationId_idx']
+    expiresAt [name: 'sessions_expiresAt_idx']
+  }
+
+  Note: 'Durable session storage with token SHA-256 hashing for defense-in-depth security.'
+}
+
+Table business_assignments {
+  id text [pk, not null, note: 'Assignment record identifier (CUID)']
+  organizationId text [not null, note: 'Target tenant organization FK']
+  userId text [not null, note: 'Assigned delegated admin user FK']
+  assignedById text [null, note: 'Platform admin user who granted access FK']
+  status AssignmentStatus [not null, default: 'ACTIVE', note: 'Assignment status: ACTIVE or REVOKED']
+  assignedAt timestamp [not null, default: `now()`, note: 'Access grant timestamp']
+  revokedAt timestamp [null, note: 'Access revocation timestamp']
+  assignmentReason text [null, note: 'Business justification for granting access']
+  revocationReason text [null, note: 'Business justification for revoking access']
+  metadata jsonb [null, note: 'Extensible JSON metadata']
+  createdAt timestamp [not null, default: `now()`, note: 'Record creation timestamp']
+  updatedAt timestamp [not null, note: 'Record update timestamp']
+
+  indexes {
+    organizationId [name: 'business_assignments_organizationId_idx']
+    userId [name: 'business_assignments_userId_idx']
+    assignedById [name: 'business_assignments_assignedById_idx']
+    status [name: 'business_assignments_status_idx']
+    (organizationId, status) [name: 'business_assignments_organizationId_status_idx']
+    (userId, status) [name: 'business_assignments_userId_status_idx']
+    (organizationId, createdAt) [name: 'business_assignments_organizationId_createdAt_idx']
+    (status, createdAt) [name: 'business_assignments_status_createdAt_idx']
+    organizationId [unique, name: 'business_assignments_organizationId_active_unique', note: 'Partial unique index enforced where status = ACTIVE']
+  }
+
+  Note: 'Phase 9D: Delegated platform administration mapping with historical audit log and partial active-state uniqueness.'
+}
+
+// ==============================================================================
+// 3. CONTACT MANAGEMENT, AUDIENCES & AUDIT
+// ==============================================================================
+
+Table contacts {
+  id text [pk, not null, note: 'Contact identifier (CUID)']
+  organizationId text [not null, note: 'Tenant organization FK']
+  phoneNumber varchar(20) [not null, note: 'Strictly normalized E.164 phone number (e.g. +919876543210)']
+  countryCode varchar(4) [null, note: 'Country calling code']
+  firstName varchar(100) [null, note: 'Contact given name']
+  lastName varchar(100) [null, note: 'Contact family name']
+  email varchar(255) [null, note: 'Optional contact email']
+  customAttributes jsonb [not null, default: '{}', note: 'Arbitrary custom metadata fields for template substitution']
+  consentStatus ConsentStatus [not null, default: 'PENDING', note: 'Fast-query consent status: OPTED_IN, OPTED_OUT, PENDING, UNKNOWN']
+  consentSource varchar(100) [null, note: 'Source of consent declaration (e.g. CSV_IMPORT, WEB_FORM)']
+  consentTimestamp timestamp [null, note: 'Timestamp when consent was recorded']
+  consentProof varchar(255) [null, note: 'Audit reference or document proof of consent']
+  isSuppressed boolean [not null, default: false, note: 'Suppression status (prevents any outbound dispatch)']
+  suppressedAt timestamp [null, note: 'Timestamp when suppression was activated']
+  suppressionReason varchar(255) [null, note: 'Reason for suppression']
+  createdAt timestamp [not null, default: `now()`, note: 'Contact record creation timestamp']
+  updatedAt timestamp [not null, note: 'Contact record update timestamp']
+
+  indexes {
+    (organizationId, phoneNumber) [unique, name: 'contacts_organizationId_phoneNumber_key']
+    (organizationId, id) [unique, name: 'contacts_organizationId_id_key']
+    (organizationId, consentStatus, isSuppressed) [name: 'contacts_organizationId_consentStatus_isSuppressed_idx']
+    (organizationId, createdAt) [name: 'contacts_organizationId_createdAt_idx']
+  }
+
+  Note: 'Audience contact entity. Uniqueness is strictly enforced per (organizationId, phoneNumber).'
+}
+
+Table contact_lists {
+  id text [pk, not null, note: 'Contact list identifier (CUID)']
+  organizationId text [not null, note: 'Tenant organization FK']
+  name varchar(100) [not null, note: 'List display name']
+  description varchar(500) [null, note: 'List narrative description']
+  createdAt timestamp [not null, default: `now()`, note: 'List creation timestamp']
+  updatedAt timestamp [not null, note: 'List update timestamp']
+
+  indexes {
+    (organizationId, name) [unique, name: 'contact_lists_organizationId_name_key']
+    (organizationId, id) [unique, name: 'contact_lists_organizationId_id_key']
+    (organizationId, createdAt) [name: 'contact_lists_organizationId_createdAt_idx']
+    (organizationId, `lower(name)`) [unique, name: 'contact_lists_org_name_lower_idx', note: 'Case-insensitive list name uniqueness per org']
+  }
+
+  Note: 'Target audience segment grouping within an organization.'
+}
+
+Table contact_list_members {
+  id text [pk, not null, note: 'Membership identifier (CUID)']
+  organizationId text [not null, note: 'Tenant organization boundary identifier']
+  listId text [not null, note: 'Target contact list FK']
+  contactId text [not null, note: 'Target contact FK']
+  addedAt timestamp [not null, default: `now()`, note: 'Timestamp contact joined the list']
+  source varchar(50) [null, default: 'CSV_IMPORT', note: 'Membership origin (e.g. CSV_IMPORT, MANUAL)']
+
+  indexes {
+    (listId, contactId) [unique, name: 'contact_list_members_listId_contactId_key']
+    (organizationId, listId) [name: 'contact_list_members_organizationId_listId_idx']
+    (organizationId, contactId) [name: 'contact_list_members_organizationId_contactId_idx']
+  }
+
+  Note: 'Junction table establishing many-to-many relationship between ContactList and Contact, reinforced with composite tenant FKs.'
+}
+
+Table consent_events {
+  id text [pk, not null, note: 'Audit event identifier (CUID)']
+  organizationId text [not null, note: 'Tenant organization FK']
+  contactId text [not null, note: 'Target contact FK']
+  eventType ConsentEventType [not null, note: 'Action: OPT_IN, OPT_OUT, SUPPRESS, UNSUPPRESS']
+  source varchar(100) [not null, note: 'Audit origin channel / system']
+  evidence varchar(500) [null, note: 'Audit proof or evidence text']
+  performedBy varchar(100) [null, default: 'system_user', note: 'Actor identity performing action']
+  createdAt timestamp [not null, default: `now()`, note: 'Audit timestamp']
+
+  indexes {
+    (organizationId, contactId) [name: 'consent_events_organizationId_contactId_idx']
+    (organizationId, eventType, createdAt) [name: 'consent_events_organizationId_eventType_createdAt_idx']
+  }
+
+  Note: 'Immutable audit trail capturing every consent state transition for compliance (GDPR/WhatsApp Terms).'
+}
+
+Table import_jobs {
+  id text [pk, not null, note: 'Import job identifier (CUID)']
+  organizationId text [not null, note: 'Tenant organization FK']
+  parentJobId text [null, note: 'Self-referencing parent job FK for immutable retry lineages']
+  listId text [null, note: 'Optional target contact list FK']
+  fileName varchar(255) [not null, note: 'Uploaded CSV filename']
+  fileSizeBytes integer [not null, note: 'Uploaded file size in bytes']
+  fileHash varchar(64) [not null, note: 'SHA-256 hash of file content for tamper-proofing']
+  clientRequestId varchar(64) [not null, note: 'Idempotency client token']
+  attemptNumber integer [not null, default: 1, note: 'Retry attempt sequence number']
+  status ImportJobStatus [not null, default: 'PENDING', note: 'Job execution state']
+  workerId varchar(100) [null, note: 'Worker identifier holding execution lease']
+  leaseExpiresAt timestamp [null, note: 'Lease expiration deadline']
+  leaseVersion integer [not null, default: 0, note: 'Optimistic fencing token to guard against stale workers']
+  totalRows integer [not null, default: 0, note: 'Total data rows detected in CSV']
+  processedRows integer [not null, default: 0, note: 'Total data rows processed so far']
+  lastProcessedRow integer [not null, default: 0, note: '1-based line number cursor reached in CSV']
+  createdContacts integer [not null, default: 0, note: 'Number of newly created contacts']
+  updatedContacts integer [not null, default: 0, note: 'Number of existing contacts updated']
+  addedToList integer [not null, default: 0, note: 'Number of contacts linked to target list']
+  skippedDuplicates integer [not null, default: 0, note: 'Number of duplicates ignored']
+  skippedSuppressed integer [not null, default: 0, note: 'Number of suppressed contacts skipped']
+  invalidRows integer [not null, default: 0, note: 'Number of invalid/malformed rows rejected']
+  rowErrors jsonb [not null, default: '[]', note: 'Structured JSON array of line validation errors']
+  failureReason varchar(500) [null, note: 'High-level failure narrative if job aborted']
+  operatorConsentDeclaration varchar(1000) [null, note: 'Explicit legal consent declaration submitted by operator']
+  declaredBy varchar(100) [null, default: 'system_user', note: 'Operator identifier']
+  startedAt timestamp [null, note: 'Processing start timestamp']
+  completedAt timestamp [null, note: 'Processing completion timestamp']
+  createdAt timestamp [not null, default: `now()`, note: 'Job creation timestamp']
+  updatedAt timestamp [not null, note: 'Job update timestamp']
+
+  indexes {
+    (organizationId, clientRequestId, attemptNumber) [unique, name: 'import_jobs_organizationId_clientRequestId_attemptNumber_key']
+    (organizationId, id) [unique, name: 'import_jobs_organizationId_id_key']
+    (organizationId, status) [name: 'import_jobs_organizationId_status_idx']
+    (organizationId, createdAt) [name: 'import_jobs_organizationId_createdAt_idx']
+  }
+
+  Note: 'Durable CSV import batch worker ledger with optimistic leasing, progress tracking, and idempotent retries.'
+}
+
+// ==============================================================================
+// 4. CAMPAIGNS & BROADCAST ORCHESTRATION
+// ==============================================================================
+
+Table campaigns {
+  id text [pk, not null, note: 'Campaign identifier (CUID)']
+  organizationId text [not null, note: 'Tenant organization FK']
+  name text [not null, note: 'Campaign title']
+  description text [null, note: 'Optional narrative description']
+  status CampaignStatus [not null, default: 'DRAFT', note: 'Campaign lifecycle status']
+  templateId text [not null, note: 'Meta WhatsApp template identifier']
+  templateName text [not null, note: 'Template name snapshot']
+  templateLanguage text [not null, default: 'en_US', note: 'Template language locale']
+  templateCategory text [not null, default: 'MARKETING', note: 'Template category: MARKETING, UTILITY, etc.']
+  variablesMapping jsonb [not null, default: '{}', note: 'JSON mapping of variable keys to contact attributes']
+  audienceType AudienceType [not null, default: 'MOCK', note: 'Audience classification: MOCK, CONTACT_LIST, SEGMENT']
+  audienceId text [null, note: 'Audience entity reference identifier']
+  audienceName text [not null, default: 'All Audience', note: 'Audience name snapshot at dispatch']
+  totalRecipients integer [not null, default: 0, note: 'Total recipient count targeted']
+  clientRequestId varchar(64) [null, note: 'Idempotency request token']
+  scheduledAt timestamp [null, note: 'Future UTC dispatch timestamp']
+  startedAt timestamp [null, note: 'Execution start timestamp']
+  completedAt timestamp [null, note: 'Execution completion timestamp']
+  createdBy text [null, default: 'system_user', note: 'Creator identity']
+  createdAt timestamp [not null, default: `now()`, note: 'Record creation timestamp']
+  updatedAt timestamp [not null, note: 'Record update timestamp']
+
+  indexes {
+    (organizationId, clientRequestId) [unique, name: 'campaigns_organizationId_clientRequestId_key']
+    (organizationId, id) [unique, name: 'campaigns_organizationId_id_key']
+    (organizationId, status) [name: 'campaigns_organizationId_status_idx']
+    (organizationId, createdAt) [name: 'campaigns_organizationId_createdAt_idx']
+  }
+
+  Note: 'Broadcast campaign model governing persistent draft, scheduled dispatch, and audience targeting.'
+}
+
+Table whatsapp_messages {
+  id text [pk, not null, note: 'Outbound message identifier (CUID)']
+  organizationId text [not null, note: 'Tenant organization FK']
+  campaignId text [null, note: 'Associated campaign FK']
+  campaignNameSnapshot varchar(100) [null, note: 'Campaign name at time of dispatch']
+  contactId text [null, note: 'Target contact FK']
+  dispatchRun integer [not null, default: 1, note: 'Dispatch execution attempt iteration']
+  clientRequestId varchar(64) [null, note: 'Client request idempotency token']
+  recipientPhone varchar(20) [not null, note: 'Recipient phone number in E.164 format']
+  templateName varchar(100) [not null, note: 'WhatsApp template name snapshot']
+  templateLanguage varchar(10) [not null, default: 'en_US', note: 'Template language snapshot']
+  parameters jsonb [not null, default: '{}', note: 'Hydrated template parameter values sent to Meta']
+  wamid varchar(128) [unique, null, note: 'WhatsApp Message ID returned by Meta Cloud API']
+  status MessageDeliveryStatus [not null, default: 'QUEUED', note: 'Delivery state machine status']
+  errorCode varchar(50) [null, note: 'Meta API failure error code']
+  errorMessage varchar(500) [null, note: 'Meta API failure message description']
+  isTerminalFailure boolean [not null, default: false, note: 'Flag indicating non-retryable failure']
+  workerId varchar(100) [null, note: 'Dispatcher worker lease owner']
+  leaseExpiresAt timestamp [null, note: 'Dispatcher lease expiration timestamp']
+  attemptCount integer [not null, default: 0, note: 'Transmission attempts performed']
+  maxAttempts integer [not null, default: 3, note: 'Maximum retry limit allowed']
+  lastAttemptAt timestamp [null, note: 'Timestamp of most recent dispatch attempt']
+  queuedAt timestamp [not null, default: `now()`, note: 'Initial queueing timestamp']
+  sentAt timestamp [null, note: 'Meta acceptance timestamp']
+  deliveredAt timestamp [null, note: 'Device delivery receipt timestamp']
+  readAt timestamp [null, note: 'Recipient read receipt timestamp']
+  failedAt timestamp [null, note: 'Terminal failure timestamp']
+  createdAt timestamp [not null, default: `now()`, note: 'Record creation timestamp']
+  updatedAt timestamp [not null, note: 'Record update timestamp']
+
+  indexes {
+    wamid [unique, name: 'whatsapp_messages_wamid_key']
+    (campaignId, contactId, dispatchRun) [unique, name: 'whatsapp_messages_campaignId_contactId_dispatchRun_key']
+    (organizationId, clientRequestId) [unique, name: 'whatsapp_messages_organizationId_clientRequestId_key']
+    (organizationId, campaignId, status) [name: 'whatsapp_messages_organizationId_campaignId_status_idx']
+    (organizationId, recipientPhone) [name: 'whatsapp_messages_organizationId_recipientPhone_idx']
+    (organizationId, createdAt) [name: 'whatsapp_messages_organizationId_createdAt_idx']
+  }
+
+  Note: 'Granular outbound WhatsApp message delivery tracking, retry state machine, and Meta delivery receipts.'
+}
+
+Table webhook_events {
+  id text [pk, not null, note: 'Webhook event identifier (CUID)']
+  organizationId text [null, note: 'Resolved tenant organization FK']
+  messageId text [null, note: 'Resolved whatsapp_messages FK']
+  wabaId varchar(64) [null, note: 'WhatsApp Business Account ID from payload']
+  phoneNumberId varchar(64) [null, note: 'Meta Phone Number ID from payload']
+  eventType varchar(50) [not null, note: 'Event category: messages, message_status, etc.']
+  wamid varchar(128) [null, note: 'Meta WhatsApp message ID from webhook payload']
+  status varchar(50) [null, note: 'Raw status value: sent, delivered, read, failed']
+  eventTimestamp timestamp [not null, note: 'Event timestamp provided in Meta payload']
+  dedupHash varchar(64) [unique, not null, note: 'Cryptographic SHA-256 deduplication hash']
+  rawPayload jsonb [not null, note: 'Verbatim incoming JSON payload from Meta webhook']
+  processed boolean [not null, default: false, note: 'Reconciliation status flag']
+  processingError varchar(500) [null, note: 'Error message if event ingestion failed']
+  retainedUntil timestamp [not null, note: 'Data retention policy expiration date']
+  createdAt timestamp [not null, default: `now()`, note: 'Record ingestion timestamp']
+
+  indexes {
+    dedupHash [unique, name: 'webhook_events_dedupHash_key']
+    wamid [name: 'webhook_events_wamid_idx']
+    (organizationId, createdAt) [name: 'webhook_events_organizationId_createdAt_idx']
+    retainedUntil [name: 'webhook_events_retainedUntil_idx']
+  }
+
+  Note: 'Immutable ingestion and deduplication buffer for all inbound Meta WhatsApp Cloud API webhooks.'
+}
+
+Table meta_accounts {
+  id text [pk, not null, note: 'Meta account identifier (CUID)']
+  organizationId text [unique, not null, note: '1-to-1 tenant organization FK']
+  wabaId varchar(64) [unique, not null, note: 'WhatsApp Business Account ID']
+  phoneNumberId varchar(64) [unique, not null, note: 'WhatsApp Phone Number ID']
+  displayPhoneNumber varchar(30) [null, note: 'Formatted sender phone number (e.g. +1 555-0199)']
+  verifiedName varchar(100) [null, note: 'Meta-verified business display name']
+  encryptedAccessToken text [not null, note: 'AES-256-GCM encrypted Meta System User Access Token']
+  tokenKeyId varchar(32) [not null, default: 'v1', note: 'Key management version identifier']
+  tokenExpiresAt timestamp [null, note: 'Access token expiration timestamp if applicable']
+  status MetaConnectionStatus [not null, default: 'PENDING_VERIFICATION', note: 'Connection lifecycle status']
+  verifiedAt timestamp [null, note: 'Verification success timestamp']
+  lastError varchar(500) [null, note: 'Most recent synchronization or API error']
+  lastSyncedAt timestamp [null, note: 'Timestamp of last successful Meta API synchronization']
+  createdAt timestamp [not null, default: `now()`, note: 'Record creation timestamp']
+  updatedAt timestamp [not null, note: 'Record update timestamp']
+
+  indexes {
+    organizationId [unique, name: 'meta_accounts_organizationId_key']
+    wabaId [unique, name: 'meta_accounts_wabaId_key']
+    phoneNumberId [unique, name: 'meta_accounts_phoneNumberId_key']
+    wabaId [name: 'meta_accounts_wabaId_idx']
+    (organizationId, status) [name: 'meta_accounts_organizationId_status_idx']
+  }
+
+  Note: 'Encrypted Meta WhatsApp Business Account (WABA) credentials and API connection health for each tenant.'
+}
+
+// ==============================================================================
+// 5. RELATIONSHIPS & CONSTRAINTS (23 Relations)
+// ==============================================================================
+
+// --- Organization Parent Cascades ---
+Ref campaigns_organizationId_fkey: campaigns.organizationId > organizations.id [delete: cascade, update: cascade]
+Ref contacts_organizationId_fkey: contacts.organizationId > organizations.id [delete: cascade, update: cascade]
+Ref contact_lists_organizationId_fkey: contact_lists.organizationId > organizations.id [delete: cascade, update: cascade]
+Ref contact_list_members_organizationId_fkey: contact_list_members.organizationId > organizations.id [delete: cascade, update: cascade]
+Ref consent_events_organizationId_fkey: consent_events.organizationId > organizations.id [delete: cascade, update: cascade]
+Ref import_jobs_organizationId_fkey: import_jobs.organizationId > organizations.id [delete: cascade, update: cascade]
+Ref users_organizationId_fkey: users.organizationId > organizations.id [delete: cascade, update: cascade]
+Ref sessions_organizationId_fkey: sessions.organizationId > organizations.id [delete: cascade, update: cascade]
+Ref meta_accounts_organizationId_fkey: meta_accounts.organizationId - organizations.id [delete: cascade, update: cascade]
+
+// --- Restrictive Tenant Boundary Foreign Keys ---
+Ref whatsapp_messages_organizationId_fkey: whatsapp_messages.organizationId > organizations.id [delete: restrict, update: cascade]
+Ref business_assignments_organizationId_fkey: business_assignments.organizationId > organizations.id [delete: restrict, update: cascade]
+
+// --- Nullable Organization Scoping ---
+Ref webhook_events_organizationId_fkey: webhook_events.organizationId > organizations.id [delete: set null, update: cascade]
+
+// --- User & Session Relationships ---
+Ref sessions_userId_fkey: sessions.userId > users.id [delete: cascade, update: cascade]
+Ref business_assignments_userId_fkey: business_assignments.userId > users.id [delete: restrict, update: cascade]
+Ref business_assignments_assignedById_fkey: business_assignments.assignedById > users.id [delete: set null, update: cascade]
+
+// --- Audience & List Composite Relationships ---
+Ref contact_list_members_organizationId_listId_fkey: contact_list_members.(organizationId, listId) > contact_lists.(organizationId, id) [delete: cascade, update: cascade]
+Ref contact_list_members_organizationId_contactId_fkey: contact_list_members.(organizationId, contactId) > contacts.(organizationId, id) [delete: cascade, update: cascade]
+Ref consent_events_organizationId_contactId_fkey: consent_events.(organizationId, contactId) > contacts.(organizationId, id) [delete: restrict, update: cascade]
+Ref import_jobs_organizationId_listId_fkey: import_jobs.(organizationId, listId) > contact_lists.(organizationId, id) [delete: restrict, update: cascade]
+Ref import_jobs_organizationId_parentJobId_fkey: import_jobs.(organizationId, parentJobId) > import_jobs.(organizationId, id) [delete: restrict, update: cascade]
+
+// --- Message Dispatch & Webhook Relationships ---
+Ref whatsapp_messages_organizationId_campaignId_fkey: whatsapp_messages.(organizationId, campaignId) > campaigns.(organizationId, id) [delete: restrict, update: cascade]
+Ref whatsapp_messages_organizationId_contactId_fkey: whatsapp_messages.(organizationId, contactId) > contacts.(organizationId, id) [delete: restrict, update: cascade]
+Ref webhook_events_messageId_fkey: webhook_events.messageId > whatsapp_messages.id [delete: set null, update: cascade]

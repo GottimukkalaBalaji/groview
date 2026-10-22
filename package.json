@@ -1,0 +1,34 @@
+{
+  "name": "grovastra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Grovastra - Reelo-inspired WhatsApp Campaign Management Platform",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev:backend": "npm --workspace=backend run dev",
+    "dev:frontend": "npm --workspace=frontend run dev",
+    "build:backend": "npm --workspace=backend run build",
+    "build:frontend": "npm --workspace=frontend run build",
+    "build": "npm run build:backend && npm run build:frontend",
+    "lint:backend": "npm --workspace=backend run lint",
+    "lint:frontend": "npm --workspace=frontend run lint",
+    "lint": "npm run lint:backend && npm run lint:frontend",
+    "test:backend": "npm --workspace=backend run test",
+    "test:frontend": "npm --workspace=frontend run test",
+    "test": "npm run test:backend && npm run test:frontend"
+  },
+  "keywords": [
+    "grovastra",
+    "whatsapp-campaigns",
+    "marketing-automation",
+    "bullmq",
+    "prisma",
+    "express",
+    "react"
+  ],
+  "author": "Grovastra Team",
+  "license": "UNLICENSED"
+}

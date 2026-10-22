@@ -1,0 +1,560 @@
+// Prisma configuration for Grovastra
+// Compatible with Supabase PostgreSQL (pooled + direct connections)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// Minimal initial model for Phase 1 verification.
+// Preserved exactly as required by Grovastra architecture.
+model SystemMeta {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("system_meta")
+}
+
+// ==============================================================================
+// Phase 3 — Stage 1: Tenant & Campaign Management Models
+// ==============================================================================
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  QUEUED
+  SENDING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum AudienceType {
+  MOCK
+  CONTACT_LIST
+  SEGMENT
+}
+
+// Initial tenant boundary model (Organization)
+model Organization {
+  id           String              @id @default(cuid())
+  name         String
+  slug         String              @unique
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  isArchived   Boolean             @default(false)
+  deletedAt    DateTime?
+
+  campaigns    Campaign[]
+  contacts     Contact[]
+  contactLists ContactList[]
+  listMembers  ContactListMember[]
+  importJobs   ImportJob[]
+  consentAudit ConsentEvent[]
+  users        User[]
+  sessions     Session[]
+  messages     WhatsAppMessage[]
+  webhookEvents WebhookEvent[]
+  metaAccount  MetaAccount?
+  assignments  BusinessAssignment[]
+
+  @@map("organizations")
+}
+
+// Campaign Model for persistent draft and broadcast orchestration
+model Campaign {
+  id               String         @id @default(cuid())
+  organizationId   String
+  organization     Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name             String
+  description      String?
+  status           CampaignStatus @default(DRAFT)
+
+  // Template snapshot fields
+  // NOTE: Template catalogue currently comes from frontend mock data.
+  // There is deliberately no FK constraint to an unverified database-backed template table.
+  templateId       String
+  templateName     String
+  templateLanguage String         @default("en_US")
+  templateCategory String         @default("MARKETING")
+
+  // Parameter variable mappings with safe default
+  variablesMapping Json           @default("{}")
+
+  // Audience snapshot & targeting classification
+  audienceType     AudienceType   @default(MOCK)
+  audienceId       String?
+  audienceName     String         @default("All Audience")
+  totalRecipients  Int            @default(0)
+
+  // Durable client-side request idempotency token
+  clientRequestId  String?        @db.VarChar(64)
+
+  // Optional scheduling timestamp (future UTC timestamp)
+  scheduledAt      DateTime?
+
+  // Lifecycle execution timestamps
+  startedAt        DateTime?
+  completedAt      DateTime?
+
+  // Creator identifier (honestly tracked without pretending authentication exists)
+  createdBy        String?        @default("system_user")
+
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  messages         WhatsAppMessage[]
+
+  @@unique([organizationId, clientRequestId])
+  @@unique([organizationId, id])
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@map("campaigns")
+}
+
+// ==============================================================================
+// Phase 4: Contacts, Contact Lists, Memberships, Consent & Import Models
+// ==============================================================================
+
+enum ConsentStatus {
+  OPTED_IN
+  OPTED_OUT
+  PENDING
+  UNKNOWN
+}
+
+enum ConsentEventType {
+  OPT_IN
+  OPT_OUT
+  SUPPRESS
+  UNSUPPRESS
+}
+
+enum ImportJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  FAILED
+}
+
+model Contact {
+  id                String              @id @default(cuid())
+  organizationId    String
+  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Strictly normalized E.164 phone representation (e.g. +919876543210)
+  phoneNumber       String              @db.VarChar(20)
+  countryCode       String?             @db.VarChar(4)
+
+  firstName         String?             @db.VarChar(100)
+  lastName          String?             @db.VarChar(100)
+  email             String?             @db.VarChar(255)
+  customAttributes  Json                @default("{}")
+
+  // Fast-query consent snapshot (Default is strictly PENDING)
+  consentStatus     ConsentStatus       @default(PENDING)
+  consentSource     String?             @db.VarChar(100)
+  consentTimestamp  DateTime?
+  consentProof      String?             @db.VarChar(255)
+
+  // Suppression status (Immutable from CSV updates)
+  isSuppressed      Boolean             @default(false)
+  suppressedAt      DateTime?
+  suppressionReason String?             @db.VarChar(255)
+
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  listMemberships   ContactListMember[]
+  consentEvents     ConsentEvent[]
+  messages          WhatsAppMessage[]
+
+  @@unique([organizationId, phoneNumber])
+  @@unique([organizationId, id])
+  @@index([organizationId, consentStatus, isSuppressed])
+  @@index([organizationId, createdAt])
+  @@map("contacts")
+}
+
+model ContactList {
+  id             String              @id @default(cuid())
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name           String              @db.VarChar(100)
+  description    String?             @db.VarChar(500)
+
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  members        ContactListMember[]
+  importJobs     ImportJob[]
+
+  @@unique([organizationId, name])
+  @@unique([organizationId, id])
+  @@index([organizationId, createdAt])
+  @@map("contact_lists")
+}
+
+model ContactListMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  listId         String
+  contactId      String
+
+  addedAt        DateTime     @default(now())
+  source         String?      @default("CSV_IMPORT") @db.VarChar(50)
+
+  // Composite foreign keys enforcing database-level tenant boundary
+  list           ContactList  @relation(fields: [organizationId, listId], references: [organizationId, id], onDelete: Cascade)
+  contact        Contact      @relation(fields: [organizationId, contactId], references: [organizationId, id], onDelete: Cascade)
+
+  @@unique([listId, contactId])
+  @@index([organizationId, listId])
+  @@index([organizationId, contactId])
+  @@map("contact_list_members")
+}
+
+model ConsentEvent {
+  id             String           @id @default(cuid())
+  organizationId String
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  contactId      String
+  // Composite relation with Restrict to ensure audit preservation and tenant isolation
+  contact        Contact          @relation(fields: [organizationId, contactId], references: [organizationId, id], onDelete: Restrict)
+
+  eventType      ConsentEventType
+  source         String           @db.VarChar(100)
+  evidence       String?          @db.VarChar(500)
+  performedBy    String?          @default("system_user") @db.VarChar(100)
+
+  createdAt      DateTime         @default(now())
+
+  @@index([organizationId, contactId])
+  @@index([organizationId, eventType, createdAt])
+  @@map("consent_events")
+}
+
+model ImportJob {
+  id                         String          @id @default(cuid())
+  organizationId             String
+  organization               Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Tenant-scoped self-relation for immutable retry history
+  parentJobId                String?
+  parentJob                  ImportJob?      @relation("ImportJobRetries", fields: [organizationId, parentJobId], references: [organizationId, id], onDelete: Restrict)
+  retryJobs                  ImportJob[]     @relation("ImportJobRetries")
+
+  // Target list with composite tenant FK
+  listId                     String?
+  list                       ContactList?    @relation(fields: [organizationId, listId], references: [organizationId, id], onDelete: Restrict)
+
+  // File identity & metadata
+  fileName                   String          @db.VarChar(255)
+  fileSizeBytes              Int
+  fileHash                   String          @db.VarChar(64) // SHA-256 of uploaded content
+
+  // Client request & attempt tracking
+  clientRequestId            String          @db.VarChar(64)
+  attemptNumber              Int             @default(1)
+
+  // Worker lease, heartbeat, and optimistic fencing
+  status                     ImportJobStatus @default(PENDING)
+  workerId                   String?         @db.VarChar(100)
+  leaseExpiresAt             DateTime?
+  leaseVersion               Int             @default(0) // Incremented on claim/renewal to fence stale workers
+
+  // Durable batch progress tracking
+  totalRows                  Int             @default(0)
+  processedRows              Int             @default(0)
+  lastProcessedRow           Int             @default(0) // 1-based line number reached in CSV
+
+  // Atomic outcome counters
+  createdContacts            Int             @default(0)
+  updatedContacts            Int             @default(0)
+  addedToList                Int             @default(0)
+  skippedDuplicates          Int             @default(0)
+  skippedSuppressed          Int             @default(0)
+  invalidRows                Int             @default(0)
+
+  // Diagnostics and declaration
+  rowErrors                  Json            @default("[]")
+  failureReason              String?         @db.VarChar(500)
+
+  operatorConsentDeclaration String?         @db.VarChar(1000)
+  declaredBy                 String?         @default("system_user") @db.VarChar(100)
+
+  startedAt                  DateTime?
+  completedAt                DateTime?
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
+
+  @@unique([organizationId, clientRequestId, attemptNumber])
+  @@unique([organizationId, id])
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@map("import_jobs")
+}
+
+// ==============================================================================
+// Phase 4C: Customer Authentication, Sessions & Tenant User Models
+// ==============================================================================
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum PlatformRole {
+  NONE
+  PLATFORM_MASTER_ADMIN
+  DELEGATED_ADMIN
+}
+
+model User {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  email          String       @db.VarChar(255)
+  passwordHash   String       @db.VarChar(255)
+  firstName      String       @db.VarChar(100)
+  lastName       String?      @db.VarChar(100)
+  role           UserRole     @default(OWNER)
+  platformRole   PlatformRole @default(NONE)
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  sessions       Session[]
+  delegatedAssignments BusinessAssignment[] @relation("DelegatedAdminAssignments")
+  assignmentsCreated   BusinessAssignment[] @relation("AssignmentsCreated")
+
+  @@unique([email])
+  @@unique([organizationId, id])
+  @@index([organizationId])
+  @@map("users")
+}
+
+model Session {
+  id             String       @id @default(cuid())
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Cryptographic SHA-256 hash of the client session token (defense-in-depth)
+  tokenHash      String       @unique @db.VarChar(64)
+  expiresAt      DateTime
+  createdAt      DateTime     @default(now())
+
+  userAgent      String?      @db.VarChar(500)
+  ipAddress      String?      @db.VarChar(45)
+
+  @@index([userId])
+  @@index([organizationId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// ==============================================================================
+// Phase 5C Models: WhatsApp Message Dispatch, State Machine & Webhook Ingestion
+// ==============================================================================
+
+enum MessageDeliveryStatus {
+  QUEUED
+  SENDING
+  SUBMITTED_UNCONFIRMED
+  ACCEPTED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+model WhatsAppMessage {
+  id                   String                @id @default(cuid())
+  organizationId       String
+  organization         Organization          @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  campaignId           String?
+  campaign             Campaign?             @relation(fields: [organizationId, campaignId], references: [organizationId, id], onDelete: Restrict)
+  campaignNameSnapshot String?               @db.VarChar(100)
+
+  contactId            String?
+  contact              Contact?              @relation(fields: [organizationId, contactId], references: [organizationId, id], onDelete: Restrict)
+
+  dispatchRun          Int                   @default(1)
+  clientRequestId      String?               @db.VarChar(64)
+
+  recipientPhone       String                @db.VarChar(20)
+  templateName         String                @db.VarChar(100)
+  templateLanguage     String                @default("en_US") @db.VarChar(10)
+  parameters           Json                  @default("{}")
+
+  wamid                String?               @unique @db.VarChar(128)
+
+  status               MessageDeliveryStatus @default(QUEUED)
+  errorCode            String?               @db.VarChar(50)
+  errorMessage         String?               @db.VarChar(500)
+  isTerminalFailure    Boolean               @default(false)
+
+  workerId             String?               @db.VarChar(100)
+  leaseExpiresAt       DateTime?
+  attemptCount         Int                   @default(0)
+  maxAttempts          Int                   @default(3)
+  lastAttemptAt        DateTime?
+
+  queuedAt             DateTime              @default(now())
+  sentAt               DateTime?
+  deliveredAt          DateTime?
+  readAt               DateTime?
+  failedAt             DateTime?
+
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  webhookEvents        WebhookEvent[]
+
+  @@unique([campaignId, contactId, dispatchRun])
+  @@unique([organizationId, clientRequestId])
+
+  @@index([organizationId, campaignId, status])
+  @@index([organizationId, recipientPhone])
+  @@index([organizationId, createdAt])
+  @@map("whatsapp_messages")
+}
+
+model WebhookEvent {
+  id              String           @id @default(cuid())
+  organizationId  String?
+  organization    Organization?    @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  messageId       String?
+  message         WhatsAppMessage? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  wabaId          String?          @db.VarChar(64)
+  phoneNumberId   String?          @db.VarChar(64)
+
+  eventType       String           @db.VarChar(50)
+  wamid           String?          @db.VarChar(128)
+  status          String?          @db.VarChar(50)
+  eventTimestamp  DateTime
+
+  dedupHash       String           @unique @db.VarChar(64)
+
+  rawPayload      Json
+  processed       Boolean          @default(false)
+  processingError String?          @db.VarChar(500)
+
+  retainedUntil   DateTime
+  createdAt       DateTime         @default(now())
+
+  @@index([wamid])
+  @@index([organizationId, createdAt])
+  @@index([retainedUntil])
+  @@map("webhook_events")
+}
+
+// ==============================================================================
+// Phase 6A Models: Multi-Tenant WhatsApp Business Account Connections
+// ==============================================================================
+
+enum MetaConnectionStatus {
+  NOT_CONNECTED
+  PENDING_VERIFICATION
+  CONNECTED
+  TOKEN_EXPIRED
+  DISCONNECTED
+  REVOKED
+}
+
+model MetaAccount {
+  id                   String               @id @default(cuid())
+  organizationId       String               @unique
+  organization         Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  wabaId               String               @unique @db.VarChar(64)
+  phoneNumberId        String               @unique @db.VarChar(64)
+  displayPhoneNumber   String?              @db.VarChar(30)
+  verifiedName         String?              @db.VarChar(100)
+
+  encryptedAccessToken String               @db.Text
+  tokenKeyId           String               @default("v1") @db.VarChar(32)
+  tokenExpiresAt       DateTime?
+
+  status               MetaConnectionStatus @default(PENDING_VERIFICATION)
+  verifiedAt           DateTime?
+  lastError            String?              @db.VarChar(500)
+  lastSyncedAt         DateTime?
+
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  @@index([wabaId])
+  @@index([organizationId, status])
+  @@map("meta_accounts")
+}
+
+// ==============================================================================
+// Phase 9D Models: Business Assignment Management
+// NOTE: Database-level partial unique index is enforced via migration SQL:
+// CREATE UNIQUE INDEX "business_assignments_organizationId_active_unique" ON "business_assignments"("organizationId") WHERE "status" = 'ACTIVE';
+// This permits multiple historical REVOKED records while restricting active assignments to at most one per organization.
+// ==============================================================================
+
+enum AssignmentStatus {
+  ACTIVE
+  REVOKED
+}
+
+model BusinessAssignment {
+  id               String           @id @default(cuid())
+  organizationId   String
+  organization     Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  userId           String
+  user             User             @relation("DelegatedAdminAssignments", fields: [userId], references: [id], onDelete: Restrict)
+
+  assignedById     String?
+  assignedBy       User?            @relation("AssignmentsCreated", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  status           AssignmentStatus @default(ACTIVE)
+  assignedAt       DateTime         @default(now())
+  revokedAt        DateTime?
+
+  assignmentReason String?
+  revocationReason String?
+
+  metadata         Json?
+
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([assignedById])
+  @@index([status])
+  @@index([organizationId, status])
+  @@index([userId, status])
+  @@index([organizationId, createdAt])
+  @@index([status, createdAt])
+  @@map("business_assignments")
+}
+
+
