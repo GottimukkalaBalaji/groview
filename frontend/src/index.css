@@ -1872,6 +1872,55 @@ a {
   overflow: hidden;
 }
 
+/* WhatsApp Message Preview Area inside Saved Template Card */
+.template-card-preview-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.wa-card-canvas {
+  background-color: #0b141a;
+  background-image: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 16px 16px;
+  border-radius: var(--radius-md);
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  min-height: 180px;
+  position: relative;
+}
+
+.wa-message-compact {
+  width: 100%;
+}
+
+.wa-bubble-compact {
+  max-width: 100% !important;
+  width: 100%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.wa-draft-clock {
+  color: #8696a0;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.wa-media-reselect-placeholder {
+  background: rgba(99, 102, 241, 0.06) !important;
+  border: 1px dashed rgba(99, 102, 241, 0.35) !important;
+  color: #c7d2fe !important;
+}
+
+.wa-media-reselect-placeholder .wa-media-placeholder-icon {
+  color: var(--accent-indigo-light);
+}
+
 .template-card-footer {
   display: flex;
   align-items: center;

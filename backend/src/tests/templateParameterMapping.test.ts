@@ -3,6 +3,8 @@ import {
   resolvePositionalTemplateParameters,
   buildMetaTemplateComponents,
   normalizeTemplateParameters,
+  resolveContactTemplateParameters,
+  validateCampaignTemplateMapping,
 } from "../services/templateParameterMapping.js";
 import { WhatsAppSendService } from "../services/whatsappSend.service.js";
 
@@ -273,6 +275,155 @@ describe("Phase 5D — Template Positional Parameter Mapping & Order Verificatio
 
       // Keys iterate in strictly 1, 2, 3 order
       expect(Object.keys(normalized)).toEqual(["1", "2", "3"]);
+    });
+  });
+
+  describe("resolveContactTemplateParameters — First Name & Offer Code Resolution", () => {
+    const validContact = {
+      id: "cnt_test_001",
+      firstName: "Balaji",
+      lastName: "Gottimukkala",
+      phoneNumber: "+919876543210",
+      email: "balaji@example.com",
+      customAttributes: {
+        offerCode: "GROV20",
+        loyaltyTier: "Platinum",
+      },
+    };
+
+    it("resolves {{1}} -> First Name using {{contact.firstName}} preset from UI", () => {
+      const result = resolveContactTemplateParameters(
+        "jaspers_market_order_confirmation_v1",
+        {
+          "1": "{{contact.firstName}}",
+          "2": "GRV-10294",
+          "3": "Friday, Oct 24",
+        },
+        validContact
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.parameters).toEqual({
+        "1": "Balaji",
+        "2": "GRV-10294",
+        "3": "Friday, Oct 24",
+      });
+    });
+
+    it("resolves {{contact.first_name}}, {{firstName}}, and {{first_name}} variations", () => {
+      for (const token of ["{{contact.first_name}}", "{{firstName}}", "{{first_name}}"]) {
+        const result = resolveContactTemplateParameters(
+          "jaspers_market_order_confirmation_v1",
+          {
+            "1": token,
+            "2": "GRV-10294",
+            "3": "Friday, Oct 24",
+          },
+          validContact
+        );
+
+        expect(result.success).toBe(true);
+        expect(result.parameters?.["1"]).toBe("Balaji");
+      }
+    });
+
+    it("resolves custom two-variable template ({{1}} -> First Name, {{2}} -> static Offer Code)", () => {
+      const result = resolveContactTemplateParameters(
+        "new_campaign_offer",
+        {
+          "1": "{{contact.firstName}}",
+          "2": "GROV20",
+        },
+        validContact
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.parameters).toEqual({
+        "1": "Balaji",
+        "2": "GROV20",
+      });
+    });
+
+    it("resolves custom two-variable template ({{1}} -> First Name, {{2}} -> dynamic Offer Code from contact attributes)", () => {
+      const result = resolveContactTemplateParameters(
+        "new_campaign_offer",
+        {
+          "1": "{{contact.firstName}}",
+          "2": "{{contact.customAttributes.offerCode}}",
+        },
+        validContact
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.parameters).toEqual({
+        "1": "Balaji",
+        "2": "GROV20",
+      });
+    });
+
+    it("fails safely when contact has null or empty firstName and does NOT substitute sample values", () => {
+      const contactNoName = {
+        id: "cnt_empty_002",
+        firstName: null,
+        lastName: null,
+        phoneNumber: "+919876543210",
+      };
+
+      const result = resolveContactTemplateParameters(
+        "new_campaign_offer",
+        {
+          "1": "{{contact.firstName}}",
+          "2": "GROV20",
+        },
+        contactNoName
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("missing attribute 'contact.firstName'");
+      expect(result.missingField).toBe("contact.firstName");
+      expect(result.parameters).toBeUndefined();
+    });
+
+    it("fails safely when dynamic offerCode is missing from contact custom attributes", () => {
+      const contactNoOffer = {
+        id: "cnt_no_offer_003",
+        firstName: "Priya",
+        phoneNumber: "+919876543210",
+        customAttributes: {},
+      };
+
+      const result = resolveContactTemplateParameters(
+        "new_campaign_offer",
+        {
+          "1": "{{contact.firstName}}",
+          "2": "{{contact.customAttributes.offerCode}}",
+        },
+        contactNoOffer
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("missing attribute 'contact.customAttributes.offerCode'");
+      expect(result.missingField).toBe("contact.customAttributes.offerCode");
+      expect(result.parameters).toBeUndefined();
+    });
+
+    it("resolves Full Name, Phone, and Email tokens correctly", () => {
+      const resultName = resolveContactTemplateParameters(
+        "custom_template",
+        {
+          "1": "{{contact.name}}",
+          "2": "{{contact.phoneNumber}}",
+          "3": "{{contact.email}}",
+        },
+        validContact
+      );
+
+      expect(resultName.success).toBe(true);
+      expect(resultName.parameters).toEqual({
+        "1": "Balaji Gottimukkala",
+        "2": "+919876543210",
+        "3": "balaji@example.com",
+      });
     });
   });
 });

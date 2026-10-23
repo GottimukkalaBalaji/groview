@@ -935,4 +935,539 @@ describe("Template Studio Entry Point & Access Control", () => {
     fireEvent.change(notesInput, { target: { value: "Landing page directs to seasonal discount with UTM tag" } });
     expect(notesInput.value).toBe("Landing page directs to seasonal discount with UTM tag");
   });
+
+  it("collapses technical action guidance by default and provides compact direction per button", async () => {
+    setupSuperAdminAuth();
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /create new template/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /create new template/i }));
+
+    // Verify compact directions are rendered on each button card
+    await waitFor(() => {
+      expect(screen.getByTestId("button-direction-0")).toBeInTheDocument();
+    });
+
+    // Button 0 is URL
+    const urlDirection = screen.getByTestId("button-direction-0");
+    expect(urlDirection).toHaveTextContent("Opens this website when the customer taps the button.");
+    expect(urlDirection).toHaveTextContent("https://grovastra.com");
+
+    // Button 1 is Phone Number
+    const phoneDirection = screen.getByTestId("button-direction-1");
+    expect(phoneDirection).toHaveTextContent("Opens the customer's phone dialer.");
+    expect(phoneDirection).toHaveTextContent("+15551234567");
+
+    // Technical action guidance is collapsed by default (inside <details> element without open attribute)
+    const guidanceCard = screen.getByTestId("action-guidance-card") as HTMLDetailsElement;
+    expect(guidanceCard.open).toBe(false);
+    expect(screen.getByText(/Learn about button actions & internal notes/i)).toBeInTheDocument();
+  });
+
+  it("lists all saved local drafts on TemplatesPage with Local Draft / Pending Meta Submission status and header type", async () => {
+    setupSuperAdminAuth();
+
+    // Save a custom local draft in localStorage
+    const savedDrafts = [
+      {
+        name: "festival_bonanza_2026",
+        category: "MARKETING",
+        language: "en_US",
+        headerType: "IMAGE",
+        body: "Exclusive festival offer {{1}}! Valid for 24 hours.",
+        footer: "Terms apply",
+        buttons: [
+          {
+            id: "btn-fest-1",
+            type: "URL",
+            text: "Shop Deal",
+            url: "https://grovastra.com/deal",
+          },
+        ],
+        variables: { "1": "DIWALI50" },
+        status: "LOCAL_DRAFT",
+        updatedAt: "2026-10-22T10:00:00.000Z",
+      },
+    ];
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(savedDrafts));
+
+    render(<TemplatesPage />);
+
+    // The draft must be listed on the Templates page even though its name is not on the test allowlist
+    await waitFor(() => {
+      expect(screen.getAllByText("festival_bonanza_2026").length).toBeGreaterThan(0);
+    });
+
+    // Displays Header Type
+    expect(screen.getByText("Header: IMAGE")).toBeInTheDocument();
+
+    // Truthful status: Local Draft + Pending Meta Submission (never Approved or Sendable)
+    expect(screen.getByText("Local Draft")).toBeInTheDocument();
+    expect(screen.getByText("Pending Meta Submission")).toBeInTheDocument();
+
+    // Browser storage explanation notice is displayed
+    expect(screen.getByTestId("browser-storage-notice")).toBeInTheDocument();
+    expect(screen.getByText(/Saved template drafts are stored in this browser profile and are pending submission to Meta/i)).toBeInTheDocument();
+  });
+
+  it("loads previously saved drafts with backward-compatible parsing for legacy single objects", async () => {
+    setupSuperAdminAuth();
+
+    // Legacy format: single draft object instead of array
+    const legacySingleDraft = {
+      name: "legacy_single_draft_obj",
+      category: "UTILITY",
+      language: "en_US",
+      headerType: "TEXT",
+      headerText: "Important Update",
+      body: "Hello {{1}}, your order status has changed.",
+      footer: "Grovastra Updates",
+      buttons: [],
+      variables: { "1": "Alex" },
+      status: "LOCAL_DRAFT",
+    };
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(legacySingleDraft));
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("legacy_single_draft_obj").length).toBeGreaterThan(0);
+    });
+
+    expect(screen.getByText("Header: TEXT")).toBeInTheDocument();
+    expect(screen.getByText("Local Draft")).toBeInTheDocument();
+    expect(screen.getByText("Pending Meta Submission")).toBeInTheDocument();
+  });
+
+  it("allows editing and re-saving an existing draft without creating duplicate entries", async () => {
+    setupSuperAdminAuth();
+
+    const existingDraft = [
+      {
+        name: "spring_exclusive_sale",
+        category: "MARKETING",
+        language: "en_US",
+        headerType: "NONE",
+        headerText: "",
+        headerMediaUrl: "",
+        body: "Hello customer, check out our spring sale!",
+        footer: "",
+        buttons: [
+          {
+            id: "btn-spring-1",
+            type: "URL",
+            text: "View Sale",
+            url: "https://grovastra.com/spring",
+          },
+        ],
+        variables: {},
+        status: "LOCAL_DRAFT",
+      },
+    ];
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(existingDraft));
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("spring_exclusive_sale").length).toBeGreaterThan(0);
+    });
+
+    // Click Edit Draft button on the local draft card
+    const editBtn = screen.getByRole("button", { name: /edit spring_exclusive_sale/i });
+    fireEvent.click(editBtn);
+
+    // Template Studio opens with the draft loaded
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("spring_exclusive_sale")).toBeInTheDocument();
+    });
+
+    // Update the body
+    const bodyInput = screen.getByPlaceholderText(/type your message body/i);
+    fireEvent.change(bodyInput, { target: { value: "Updated spring sale with exciting rewards and perks!" } });
+
+    // Save the draft again
+    const saveBtn = screen.getByRole("button", { name: /save local draft/i });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Draft "spring_exclusive_sale" saved locally/i)).toBeInTheDocument();
+    });
+
+    // Return to Templates page
+    const backBtn = screen.getByRole("button", { name: /back to templates list/i });
+    fireEvent.click(backBtn);
+
+    // Verify the list still contains exactly one instance of spring_exclusive_sale card (no duplicate card created)
+    await waitFor(() => {
+      const editButtons = screen.getAllByRole("button", { name: /edit spring_exclusive_sale/i });
+      expect(editButtons.length).toBe(1);
+    });
+
+    expect(screen.getByText("Updated spring sale with exciting rewards and perks!")).toBeInTheDocument();
+
+    // Verify localStorage has only 1 entry
+    const inStorage = JSON.parse(localStorage.getItem("grovastra_local_template_drafts_v1") || "[]");
+    const matching = inStorage.filter((d: any) => d.name === "spring_exclusive_sale");
+    expect(matching.length).toBe(1);
+  });
+
+  it("ensures internal author action notes never leak into message preview or customer content", async () => {
+    setupSuperAdminAuth();
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /create new template/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /create new template/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("action-guidance-notes")).toBeInTheDocument();
+    });
+
+    // Enter sensitive internal notes
+    const notesInput = screen.getByTestId("action-guidance-notes") as HTMLTextAreaElement;
+    fireEvent.change(notesInput, {
+      target: { value: "INTERNAL ONLY: Marketing UTM campaign=secret_vip_q4 discount=40" },
+    });
+
+    // Check phone preview column
+    const previewContainer = document.querySelector(".workspace-col-preview");
+    expect(previewContainer).toBeInTheDocument();
+
+    // The internal notes must NEVER appear in the preview container
+    expect(previewContainer?.textContent).not.toContain("INTERNAL ONLY");
+    expect(previewContainer?.textContent).not.toContain("secret_vip_q4");
+  });
+
+  it("filters local drafts accurately when selecting Local Drafts filter", async () => {
+    setupSuperAdminAuth();
+
+    const drafts = [
+      {
+        name: "filtered_local_draft",
+        category: "UTILITY",
+        language: "en_US",
+        headerType: "NONE",
+        headerText: "",
+        headerMediaUrl: "",
+        body: "Your package is on its way.",
+        footer: "",
+        buttons: [],
+        variables: {},
+        status: "LOCAL_DRAFT",
+      },
+    ];
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(drafts));
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("filtered_local_draft").length).toBeGreaterThan(0);
+    });
+
+    // Filter by LOCAL_DRAFT
+    const statusSelect = screen.getByLabelText(/filter by status/i);
+    fireEvent.change(statusSelect, { target: { value: "LOCAL_DRAFT" } });
+
+    // Local draft is still visible
+    expect(screen.getAllByText("filtered_local_draft").length).toBeGreaterThan(0);
+
+    // Filter by SENDABLE (only approved Meta templates)
+    fireEvent.change(statusSelect, { target: { value: "SENDABLE" } });
+
+    // Local draft is hidden
+    expect(screen.queryByText("filtered_local_draft")).not.toBeInTheDocument();
+  });
+
+  it("renders saved template cards as WhatsApp-style message bubbles with actual content, headers, footers, and CTA buttons", async () => {
+    setupSuperAdminAuth();
+
+    const savedDraft = [
+      {
+        name: "diwali_vip_offer",
+        category: "MARKETING",
+        language: "en_US",
+        headerType: "TEXT",
+        headerText: "Diwali *Special* Offer",
+        headerMediaUrl: "",
+        body: "Hello {{1}}, enjoy an exclusive *20% off* on all electronics this week! Use code ~EXPIRED~ *FESTIVE20* at checkout.",
+        footer: "Reply STOP to unsubscribe",
+        buttons: [
+          {
+            id: "btn-diwali-1",
+            type: "URL",
+            text: "Claim Discount",
+            url: "https://grovastra.com/diwali",
+          },
+          {
+            id: "btn-diwali-2",
+            type: "PHONE_NUMBER",
+            text: "Call Support",
+            phoneNumber: "+15551234567",
+          },
+        ],
+        variables: { "1": "Priya" },
+        status: "LOCAL_DRAFT",
+      },
+    ];
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(savedDraft));
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("diwali_vip_offer").length).toBeGreaterThan(0);
+    });
+
+    // 1. Metadata toolbar outside the bubble
+    expect(screen.getByText("MARKETING")).toBeInTheDocument();
+    expect(screen.getAllByText("en_US").length).toBeGreaterThan(0);
+    expect(screen.getByText("Header: TEXT")).toBeInTheDocument();
+    expect(screen.getByText("Local Draft")).toBeInTheDocument();
+    expect(screen.getByText("Pending Meta Submission")).toBeInTheDocument();
+
+    // 2. WhatsApp chat canvas & message bubble inside the card
+    const previewContainer = screen.getByTestId("template-card-preview-local-draft-diwali_vip_offer");
+    expect(previewContainer).toBeInTheDocument();
+
+    // Text header rendered inside bubble
+    const headerTextEl = previewContainer.querySelector(".wa-bubble-header-text");
+    expect(headerTextEl).toBeInTheDocument();
+    expect(headerTextEl?.textContent).toContain("Diwali *Special* Offer");
+
+    // Formatted body rendered with sample variable replacement Priya
+    const bubbleBody = previewContainer.querySelector(".wa-bubble-body");
+    expect(bubbleBody).toBeInTheDocument();
+    expect(bubbleBody?.textContent).toContain("Hello Priya, enjoy an exclusive 20% off on all electronics this week!");
+    // Bold tag exists for *20% off*
+    expect(bubbleBody?.innerHTML).toContain("<strong>20% off</strong>");
+    // Strike tag exists for ~EXPIRED~
+    expect(bubbleBody?.innerHTML).toContain("<del>EXPIRED</del>");
+
+    // Footer text rendered
+    const footerEl = previewContainer.querySelector(".wa-bubble-footer");
+    expect(footerEl).toBeInTheDocument();
+    expect(footerEl?.textContent).toBe("Reply STOP to unsubscribe");
+
+    // Subtle draft indicator clock (does NOT imply delivered/sent)
+    const clockEl = previewContainer.querySelector(".wa-draft-clock");
+    expect(clockEl).toBeInTheDocument();
+    // Must NOT show double blue ticks for a local draft
+    expect(previewContainer.querySelector(".wa-ticks")).not.toBeInTheDocument();
+
+    // CTA buttons stack
+    const buttonsStack = previewContainer.querySelector(".wa-buttons-stack");
+    expect(buttonsStack).toBeInTheDocument();
+    expect(buttonsStack?.textContent).toContain("Claim Discount");
+    expect(buttonsStack?.textContent).toContain("Call Support");
+
+    // 3. Actions remain available in card footer
+    expect(screen.getByRole("button", { name: /edit diwali_vip_offer/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /preview diwali_vip_offer/i })).toBeInTheDocument();
+  });
+
+  it("ensures different saved templates render their own distinct preview state without leaking", async () => {
+    setupSuperAdminAuth();
+
+    const multiDrafts = [
+      {
+        name: "order_confirmation_draft",
+        category: "UTILITY",
+        language: "en_US",
+        headerType: "DOCUMENT",
+        headerMediaFilename: "invoice_1001.pdf",
+        headerMediaFilesize: "128 KB",
+        body: "Hi {{1}}, your order #9948 has been placed.",
+        footer: "Order Helpdesk",
+        buttons: [
+          {
+            id: "btn-order-1",
+            type: "PHONE_NUMBER",
+            text: "Track by Phone",
+            phoneNumber: "+15559876543",
+          },
+        ],
+        variables: { "1": "David" },
+        status: "LOCAL_DRAFT",
+      },
+      {
+        name: "flash_sale_draft",
+        category: "MARKETING",
+        language: "en_US",
+        headerType: "TEXT",
+        headerText: "Midnight Flash Sale",
+        body: "Hey {{1}}, 50% flash sale starts in 10 minutes!",
+        footer: "Terms apply",
+        buttons: [
+          {
+            id: "btn-sale-1",
+            type: "URL",
+            text: "Shop Flash Sale",
+            url: "https://grovastra.com/flash",
+          },
+        ],
+        variables: { "1": "Sarah" },
+        status: "LOCAL_DRAFT",
+      },
+    ];
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(multiDrafts));
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("order_confirmation_draft").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("flash_sale_draft").length).toBeGreaterThan(0);
+    });
+
+    const card1 = screen.getByTestId("template-card-preview-local-draft-order_confirmation_draft");
+    const card2 = screen.getByTestId("template-card-preview-local-draft-flash_sale_draft");
+
+    // Card 1 assertions
+    expect(card1.textContent).toContain("invoice_1001.pdf");
+    expect(card1.textContent).toContain("Hi David, your order #9948 has been placed.");
+    expect(card1.textContent).toContain("Track by Phone");
+    expect(card1.textContent).not.toContain("Midnight Flash Sale");
+    expect(card1.textContent).not.toContain("Shop Flash Sale");
+
+    // Card 2 assertions
+    expect(card2.textContent).toContain("Midnight Flash Sale");
+    expect(card2.textContent).toContain("Hey Sarah, 50% flash sale starts in 10 minutes!");
+    expect(card2.textContent).toContain("Shop Flash Sale");
+    expect(card2.textContent).not.toContain("invoice_1001.pdf");
+    expect(card2.textContent).not.toContain("Hi David");
+  });
+
+  it("shows clear placeholder when local media is expired after refresh and never invents fake stock images", async () => {
+    setupSuperAdminAuth();
+
+    // Draft where user previously uploaded a local image, but after page reload the temporary blob is gone
+    const draftWithExpiredLocalMedia = [
+      {
+        name: "product_launch_card",
+        category: "MARKETING",
+        language: "en_US",
+        headerType: "IMAGE",
+        headerMediaUrl: "", // blob URL was cleared / expired
+        headerMediaIsLocal: true,
+        headerMediaFilename: "banner_hero.jpg",
+        body: "Check out our newest flagship product!",
+        footer: "",
+        buttons: [],
+        variables: {},
+        status: "LOCAL_DRAFT",
+      },
+    ];
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(draftWithExpiredLocalMedia));
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("product_launch_card").length).toBeGreaterThan(0);
+    });
+
+    const previewContainer = screen.getByTestId("template-card-preview-local-draft-product_launch_card");
+
+    // Placeholder displayed for local media re-selection
+    expect(previewContainer.textContent).toContain("Image Header (Re-select image)");
+    expect(previewContainer.textContent).toContain("banner_hero.jpg");
+    expect(previewContainer.textContent).toContain("Local file preview not available after refresh");
+
+    // Must NOT have any <img> tag with a stock photo or invented preview
+    const imgTag = previewContainer.querySelector("img");
+    expect(imgTag).toBeNull();
+
+    // Body content is still preserved and visible
+    expect(previewContainer.textContent).toContain("Check out our newest flagship product!");
+  });
+
+  it("opens full phone preview when clicking Preview button on saved template card", async () => {
+    setupSuperAdminAuth();
+
+    const savedDraft = [
+      {
+        name: "modal_preview_test_draft",
+        category: "MARKETING",
+        language: "en_US",
+        headerType: "TEXT",
+        headerText: "Preview Modal Header",
+        body: "Testing full modal preview functionality.",
+        footer: "Grovastra Footnote",
+        buttons: [],
+        variables: {},
+        status: "LOCAL_DRAFT",
+      },
+    ];
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(savedDraft));
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("modal_preview_test_draft").length).toBeGreaterThan(0);
+    });
+
+    // Click Preview button on the card
+    const previewBtn = screen.getByRole("button", { name: /preview modal_preview_test_draft/i });
+    fireEvent.click(previewBtn);
+
+    // Full inspection workspace opens
+    await waitFor(() => {
+      expect(screen.getByText("Inspecting Template (Read-Only):")).toBeInTheDocument();
+      expect(screen.getByText("modal_preview_test_draft")).toBeInTheDocument();
+    });
+
+    // The full phone frame is rendered
+    expect(document.querySelector(".phone-frame")).toBeInTheDocument();
+    expect(screen.getByText("Official Business Account")).toBeInTheDocument();
+
+    // Back button returns to Templates page list
+    const backBtn = screen.getByRole("button", { name: /back to templates list/i });
+    fireEvent.click(backBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("WhatsApp Message Templates")).toBeInTheDocument();
+    });
+  });
+
+  it("deletes a local draft card when clicking delete action", async () => {
+    setupSuperAdminAuth();
+
+    const draftToDelete = [
+      {
+        name: "draft_to_be_deleted",
+        category: "UTILITY",
+        language: "en_US",
+        headerType: "NONE",
+        body: "This draft should be deleted.",
+        footer: "",
+        buttons: [],
+        variables: {},
+        status: "LOCAL_DRAFT",
+      },
+    ];
+    localStorage.setItem("grovastra_local_template_drafts_v1", JSON.stringify(draftToDelete));
+
+    render(<TemplatesPage />);
+
+    await waitFor(() => {
+      expect(screen.getAllByText("draft_to_be_deleted").length).toBeGreaterThan(0);
+    });
+
+    // Click Delete button
+    const deleteBtn = screen.getByRole("button", { name: /delete draft_to_be_deleted/i });
+    fireEvent.click(deleteBtn);
+
+    // Draft card is removed from view
+    await waitFor(() => {
+      expect(screen.queryByText("draft_to_be_deleted")).not.toBeInTheDocument();
+    });
+
+    // Storage is cleared
+    const inStorage = JSON.parse(localStorage.getItem("grovastra_local_template_drafts_v1") || "[]");
+    expect(inStorage.find((d: any) => d.name === "draft_to_be_deleted")).toBeUndefined();
+  });
 });

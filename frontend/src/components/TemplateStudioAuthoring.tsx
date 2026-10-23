@@ -13,8 +13,14 @@ import {
   Image as ImageIcon,
   Video,
   Compass,
+  Phone,
+  ExternalLink,
+  Send,
+  CheckCircle,
+  Loader2,
 } from "lucide-react";
-import { WhatsAppTemplate } from "../types/template.js";
+import { WhatsAppTemplate, TemplateCategory, SubmitTemplatePayload, SubmittedTemplateResponse } from "../types/template.js";
+import { apiClient } from "../services/api.js";
 import { WhatsAppPhonePreview } from "./WhatsAppPhonePreview.js";
 import {
   TemplateStudioType,
@@ -37,7 +43,7 @@ export interface DraftButton {
 
 export interface DraftState {
   name: string;
-  category: "MARKETING" | "UTILITY";
+  category: TemplateCategory;
   language: string;
   headerType: "NONE" | "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT";
   headerText: string;
@@ -122,23 +128,175 @@ const DEFAULT_DRAFT: DraftState = {
   actionGuidance: "",
 };
 
-const DRAFTS_STORAGE_KEY = "grovastra_local_template_drafts_v1";
+export const DRAFTS_STORAGE_KEY = "grovastra_local_template_drafts_v1";
 
-interface TemplateStudioAuthoringProps {
+export function templateToDraft(t?: WhatsAppTemplate | null): DraftState | null {
+  if (!t) return null;
+  const isMedia =
+    t.header.type === "IMAGE" ||
+    t.header.type === "VIDEO" ||
+    t.header.type === "DOCUMENT";
+
+  const varsMap: Record<string, string> = {};
+  (t.variables || []).forEach((v) => {
+    varsMap[v.key] = v.sampleValue || v.fallbackValue || `Sample ${v.key}`;
+  });
+
+  return {
+    name: t.name,
+    category: t.category,
+    language: t.language || "en_US",
+    headerType: (t.header.type || "NONE") as DraftState["headerType"],
+    headerText: t.header.type === "TEXT" ? (t.header.text || "") : "",
+    headerMediaUrl: isMedia ? (t.header.mediaUrl || "") : "",
+    headerMediaSource: t.header.mediaIsLocal ? "FILE" : "URL",
+    headerMediaFilename: t.header.mediaFilename,
+    headerMediaFilesize: t.header.mediaFilesize,
+    headerMediaMimeType: t.header.mimeType,
+    body: t.body || "",
+    footer: t.footer || "",
+    buttons: (t.buttons || []).map((b, idx) => ({
+      id: b.id || `btn-${idx}`,
+      type: b.type as DraftButton["type"],
+      text: b.text || "",
+      url: b.url,
+      phoneNumber: b.phoneNumber,
+    })),
+    variables: varsMap,
+    actionGuidance: "",
+  };
+}
+
+/**
+ * Transforms standard template draft state into a compliant Meta Graph API submission payload.
+ */
+export function buildMetaSubmissionPayload(draft: DraftState): SubmitTemplatePayload {
+  const components: SubmitTemplatePayload["components"] = [];
+
+  // 1. Header component
+  if (draft.headerType === "TEXT" && draft.headerText?.trim()) {
+    const text = draft.headerText.trim();
+    const headerComp: SubmitTemplatePayload["components"][0] = {
+      type: "HEADER",
+      format: "TEXT",
+      text,
+    };
+    const headerVarMatch = text.match(/\{\{(\d+)\}\}/);
+    if (headerVarMatch) {
+      const varKey = headerVarMatch[1];
+      headerComp.example = {
+        header_text: [draft.variables[varKey]?.trim() || `Sample ${varKey}`],
+      };
+    }
+    components.push(headerComp);
+  } else if (
+    draft.headerType === "IMAGE" ||
+    draft.headerType === "VIDEO" ||
+    draft.headerType === "DOCUMENT"
+  ) {
+    components.push({
+      type: "HEADER",
+      format: draft.headerType,
+      example: {
+        header_handle: [
+          draft.headerMediaUrl && !draft.headerMediaUrl.startsWith("blob:")
+            ? draft.headerMediaUrl
+            : "https://images.unsplash.com/photo-1607082348824-0a96f2a4b9da",
+        ],
+      },
+    });
+  }
+
+  // 2. Body component
+  const bodyText = draft.body || "";
+  const bodyComp: SubmitTemplatePayload["components"][0] = {
+    type: "BODY",
+    text: bodyText,
+  };
+  const bodyMatches = Array.from(bodyText.matchAll(/\{\{(\d+)\}\}/g));
+  if (bodyMatches.length > 0) {
+    const sampleRow = bodyMatches.map((m) => {
+      const varKey = m[1];
+      return draft.variables[varKey]?.trim() || `Sample ${varKey}`;
+    });
+    bodyComp.example = {
+      body_text: [sampleRow],
+    };
+  }
+  components.push(bodyComp);
+
+  // 3. Footer component
+  if (draft.footer?.trim()) {
+    components.push({
+      type: "FOOTER",
+      text: draft.footer.trim(),
+    });
+  }
+
+  // 4. Buttons component
+  if (draft.buttons && draft.buttons.length > 0) {
+    components.push({
+      type: "BUTTONS",
+      buttons: draft.buttons.map((b) => {
+        if (b.type === "URL") {
+          const btn: any = {
+            type: "URL",
+            text: b.text.trim(),
+            url: b.url?.trim() || "https://grovastra.com",
+          };
+          if (/\{\{1\}\}/.test(b.url || "")) {
+            btn.example = ["https://grovastra.com/sample"];
+          }
+          return btn;
+        } else if (b.type === "PHONE_NUMBER") {
+          return {
+            type: "PHONE_NUMBER",
+            text: b.text.trim(),
+            phone_number: b.phoneNumber?.trim() || "+15551234567",
+          };
+        } else {
+          return {
+            type: "QUICK_REPLY",
+            text: b.text.trim(),
+          };
+        }
+      }),
+    });
+  }
+
+  return {
+    name: draft.name.trim(),
+    category: draft.category,
+    language: draft.language || "en_US",
+    components,
+  };
+}
+
+export interface TemplateStudioAuthoringProps {
   onBack: () => void;
   onSelectTemplate?: (template: WhatsAppTemplate) => void;
+  initialTemplate?: WhatsAppTemplate | null;
+  onDraftSaved?: () => void;
 }
 
 export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = ({
   onBack,
+  initialTemplate,
+  onDraftSaved,
 }) => {
   const [draft, setDraft] = useState<DraftState>(() => {
+    if (initialTemplate) {
+      const fromInitial = templateToDraft(initialTemplate);
+      if (fromInitial) return fromInitial;
+    }
     try {
       const saved = localStorage.getItem(DRAFTS_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
           return { ...DEFAULT_DRAFT, ...parsed[0] };
+        } else if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          return { ...DEFAULT_DRAFT, ...parsed };
         }
       }
     } catch {
@@ -157,6 +315,16 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
   const [savedDraftSnapshot, setSavedDraftSnapshot] = useState<DraftState>(() => draft);
   const [pendingTypeSwitch, setPendingTypeSwitch] = useState<TemplateStudioType | null>(null);
   const [showTypeSwitchModal, setShowTypeSwitchModal] = useState<boolean>(false);
+
+  // Meta Submission State
+  const [showSubmitModal, setShowSubmitModal] = useState<boolean>(false);
+  const [isSubmittingToMeta, setIsSubmittingToMeta] = useState<boolean>(false);
+  const [submitResult, setSubmitResult] = useState<{
+    success: boolean;
+    data?: SubmittedTemplateResponse;
+    error?: string;
+  } | null>(null);
+  const [acknowledgedReview, setAcknowledgedReview] = useState<boolean>(false);
 
   // Active blob object URL ref for local media preview cleanup
   const activeObjectURLRef = useRef<string | null>(null);
@@ -702,9 +870,25 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
 
     try {
       const existingRaw = localStorage.getItem(DRAFTS_STORAGE_KEY);
-      const list: any[] = existingRaw ? JSON.parse(existingRaw) : [];
+      let list: any[] = [];
+      if (existingRaw) {
+        try {
+          const parsed = JSON.parse(existingRaw);
+          list = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === "object" ? [parsed] : []);
+        } catch {
+          list = [];
+        }
+      }
       // Do not persist temporary blob: URLs into durable storage
       const mediaUrlToPersist = draft.headerMediaUrl.startsWith("blob:") ? "" : draft.headerMediaUrl;
+      const originalName = initialTemplate?.name;
+      const filteredList = list.filter((d: any) => {
+        if (!d) return false;
+        if (d.name === draft.name) return false;
+        if (originalName && d.name === originalName) return false;
+        return true;
+      });
+
       const updatedList = [
         {
           ...draft,
@@ -712,15 +896,89 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
           headerMediaIsLocal: draft.headerMediaSource === "FILE" || draft.headerMediaUrl.startsWith("blob:"),
           updatedAt: new Date().toISOString(),
           status: "LOCAL_DRAFT",
+          isLocalDraft: true,
         },
-        ...list.filter((d) => d.name !== draft.name),
+        ...filteredList,
       ];
       localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(updatedList));
       setSavedDraftSnapshot({ ...draft });
       showToast(`Draft "${draft.name}" saved locally.`);
+      onDraftSaved?.();
     } catch {
       setSavedDraftSnapshot({ ...draft });
       showToast("Draft saved in session memory.");
+    }
+  };
+
+  const handleOpenSubmitModal = () => {
+    if (selectedType !== "STANDARD") {
+      showToast("Only Standard templates can be submitted to Meta currently.");
+      return;
+    }
+    if (!validateDraft()) {
+      showToast("Please correct validation errors before submitting to Meta.");
+      return;
+    }
+    setSubmitResult(null);
+    setAcknowledgedReview(false);
+    setShowSubmitModal(true);
+  };
+
+  const handleConfirmSubmit = async () => {
+    if (isSubmittingToMeta) return;
+    setIsSubmittingToMeta(true);
+    setSubmitResult(null);
+
+    try {
+      const payload = buildMetaSubmissionPayload(draft);
+      const res = await apiClient.createTemplate(payload);
+
+      if (res.data) {
+        setSubmitResult({
+          success: true,
+          data: res.data,
+        });
+
+        // Also update local storage drafts with returned status and Meta ID
+        try {
+          const existingRaw = localStorage.getItem(DRAFTS_STORAGE_KEY);
+          let list: any[] = [];
+          if (existingRaw) {
+            try {
+              const parsed = JSON.parse(existingRaw);
+              list = Array.isArray(parsed) ? parsed : (parsed && typeof parsed === "object" ? [parsed] : []);
+            } catch {
+              list = [];
+            }
+          }
+          const filtered = list.filter((d: any) => d && d.name !== draft.name);
+          const updatedList = [
+            {
+              ...draft,
+              id: res.data.id || `meta-${draft.name}`,
+              metaTemplateId: res.data.id,
+              status: res.data.status || "PENDING",
+              isLocalDraft: false,
+              updatedAt: new Date().toISOString(),
+            },
+            ...filtered,
+          ];
+          localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(updatedList));
+        } catch {
+          // ignore storage error
+        }
+
+        showToast(`Template "${draft.name}" submitted to Meta for review.`);
+        onDraftSaved?.();
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to submit template to Meta.";
+      setSubmitResult({
+        success: false,
+        error: message,
+      });
+    } finally {
+      setIsSubmittingToMeta(false);
     }
   };
 
@@ -818,6 +1076,329 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
                 Discard & Exit
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Meta Template Submission Review & Confirmation Modal */}
+      {showSubmitModal && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!isSubmittingToMeta) {
+              setShowSubmitModal(false);
+            }
+          }}
+          data-testid="submit-meta-modal-backdrop"
+        >
+          <div
+            className="modal-card submit-meta-modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            data-testid="submit-meta-modal"
+            style={{ maxWidth: "600px", width: "95%", maxHeight: "90vh", overflowY: "auto" }}
+          >
+            {submitResult?.success ? (
+              <>
+                <div className="modal-header" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+                  <h3 className="modal-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <CheckCircle size={20} style={{ color: "var(--accent-emerald, #10b981)" }} />
+                    <span>Submitted to Meta for Review</span>
+                  </h3>
+                </div>
+                <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "1rem", paddingTop: "1rem" }}>
+                  <div
+                    style={{
+                      background: "rgba(16, 185, 129, 0.08)",
+                      border: "1px solid rgba(16, 185, 129, 0.25)",
+                      borderRadius: "var(--radius-md)",
+                      padding: "1rem",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+                      <strong style={{ color: "var(--text-primary)", fontSize: "0.95rem" }}>{submitResult.data?.name}</strong>
+                      <span
+                        className="status-sub-pill"
+                        data-testid="meta-returned-status"
+                        style={{
+                          background: "rgba(245, 158, 11, 0.15)",
+                          color: "var(--accent-amber, #f59e0b)",
+                          fontWeight: 700,
+                          fontSize: "0.75rem",
+                          padding: "0.2rem 0.5rem",
+                          borderRadius: "var(--radius-full)",
+                        }}
+                      >
+                        {submitResult.data?.status || "PENDING"}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: "0.82rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                      <div>Meta Template ID: <code data-testid="meta-template-id" style={{ color: "var(--accent-indigo-light)", background: "rgba(255,255,255,0.05)", padding: "0.1rem 0.35rem", borderRadius: "3px" }}>{submitResult.data?.id}</code></div>
+                      <div style={{ marginTop: "0.25rem" }}>Category: <strong>{submitResult.data?.category}</strong> | Language: <strong>{submitResult.data?.language}</strong></div>
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: "0.84rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                    <p style={{ margin: 0 }}>
+                      Your template has been submitted to Meta WhatsApp Cloud API. Meta review typically takes between a few minutes and 24 hours.
+                    </p>
+                    <p style={{ margin: "0.5rem 0 0 0", color: "var(--accent-amber)", fontSize: "0.8rem", fontWeight: 500 }}>
+                      Important: A successful submission creates the template with status <strong>PENDING</strong>. Approval is determined solely by Meta and is not guaranteed.
+                    </p>
+                  </div>
+                </div>
+                <div className="modal-footer" style={{ borderTop: "1px solid var(--border-subtle)", marginTop: "1rem", paddingTop: "0.75rem" }}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setShowSubmitModal(false)}
+                    id="close-submit-modal-btn"
+                  >
+                    Stay in Editor
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => {
+                      setShowSubmitModal(false);
+                      onBack();
+                    }}
+                    id="view-templates-list-btn"
+                    data-testid="view-templates-list-btn"
+                  >
+                    View in Templates List
+                  </button>
+                </div>
+              </>
+            ) : submitResult?.error ? (
+              <>
+                <div className="modal-header">
+                  <h3 className="modal-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <AlertCircle size={20} style={{ color: "var(--accent-rose, #ef4444)" }} />
+                    <span>Meta Submission Failed</span>
+                  </h3>
+                </div>
+                <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                  <div
+                    style={{
+                      background: "rgba(239, 68, 68, 0.08)",
+                      border: "1px solid rgba(239, 68, 68, 0.25)",
+                      borderRadius: "var(--radius-md)",
+                      padding: "1rem",
+                      color: "var(--text-primary)",
+                      fontSize: "0.85rem",
+                      lineHeight: 1.5,
+                    }}
+                    data-testid="submission-error-message"
+                  >
+                    <strong>Error from Meta / Server:</strong>
+                    <div style={{ marginTop: "0.35rem", color: "var(--accent-rose, #ef4444)" }}>{submitResult.error}</div>
+                  </div>
+                  <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--text-secondary)" }}>
+                    Please review your template configuration and credentials before submitting again.
+                  </p>
+                </div>
+                <div className="modal-footer">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setSubmitResult(null);
+                      setShowSubmitModal(false);
+                    }}
+                    id="edit-template-btn"
+                  >
+                    Back to Editor
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="modal-header" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+                  <h3 className="modal-title" style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <Send size={18} style={{ color: "var(--accent-indigo-light, #818cf8)" }} />
+                    <span>Review &amp; Confirm Meta Submission</span>
+                  </h3>
+                </div>
+                <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "1rem", paddingTop: "0.85rem" }}>
+                  <div
+                    style={{
+                      background: "rgba(245, 158, 11, 0.08)",
+                      border: "1px solid rgba(245, 158, 11, 0.25)",
+                      borderRadius: "var(--radius-md)",
+                      padding: "0.75rem 1rem",
+                      fontSize: "0.8rem",
+                      color: "var(--accent-amber)",
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    <strong>Important Policy Notice:</strong> Submitting sends this exact template payload to Meta&apos;s WhatsApp Cloud API for review. Content cannot be edited once submitted without creating a new version. Meta review typically takes between a few minutes and 24 hours. <em>Approval is not guaranteed.</em>
+                  </div>
+
+                  {/* Summary Card */}
+                  <div
+                    style={{
+                      background: "rgba(255, 255, 255, 0.02)",
+                      border: "1px solid var(--border-subtle)",
+                      borderRadius: "var(--radius-md)",
+                      padding: "1rem",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "0.65rem",
+                      fontSize: "0.82rem",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border-subtle)", paddingBottom: "0.5rem" }}>
+                      <div>
+                        <span style={{ color: "var(--text-secondary)" }}>Template Name: </span>
+                        <strong style={{ color: "var(--text-primary)" }}>{draft.name}</strong>
+                      </div>
+                      <div>
+                        <span style={{ color: "var(--text-secondary)" }}>Category: </span>
+                        <span style={{ color: "var(--accent-indigo-light)", fontWeight: 600 }}>{draft.category}</span>
+                        <span style={{ color: "var(--text-secondary)", marginLeft: "0.75rem" }}>Language: </span>
+                        <strong style={{ color: "var(--text-primary)" }}>{draft.language}</strong>
+                      </div>
+                    </div>
+
+                    {draft.headerType !== "NONE" && (
+                      <div>
+                        <span style={{ color: "var(--text-secondary)" }}>Header ({draft.headerType}): </span>
+                        <span style={{ color: "var(--text-primary)" }}>
+                          {draft.headerType === "TEXT" ? draft.headerText : (draft.headerMediaUrl || "(Sample Media)")}
+                        </span>
+                      </div>
+                    )}
+
+                    <div>
+                      <div style={{ color: "var(--text-secondary)", marginBottom: "0.25rem" }}>Body Text:</div>
+                      <div
+                        style={{
+                          background: "rgba(0, 0, 0, 0.25)",
+                          padding: "0.6rem 0.75rem",
+                          borderRadius: "4px",
+                          fontFamily: "inherit",
+                          whiteSpace: "pre-wrap",
+                          color: "var(--text-primary)",
+                          lineHeight: 1.45,
+                        }}
+                      >
+                        {draft.body}
+                      </div>
+                    </div>
+
+                    {draft.footer && (
+                      <div>
+                        <span style={{ color: "var(--text-secondary)" }}>Footer: </span>
+                        <span style={{ color: "var(--text-muted)" }}>{draft.footer}</span>
+                      </div>
+                    )}
+
+                    {draft.buttons.length > 0 && (
+                      <div>
+                        <div style={{ color: "var(--text-secondary)", marginBottom: "0.25rem" }}>Buttons ({draft.buttons.length}):</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+                          {draft.buttons.map((b, idx) => (
+                            <div key={b.id || idx} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.78rem" }}>
+                              <span style={{ color: "var(--accent-indigo-light)", fontWeight: 600 }}>[{b.type}]</span>
+                              <span>&ldquo;{b.text}&rdquo;</span>
+                              {b.url && <span style={{ color: "var(--text-muted)" }}>&rarr; {b.url}</span>}
+                              {b.phoneNumber && <span style={{ color: "var(--text-muted)" }}>&rarr; {b.phoneNumber}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {detectedVariableKeys.length > 0 && (
+                      <div style={{ borderTop: "1px solid var(--border-subtle)", paddingTop: "0.5rem" }}>
+                        <div style={{ color: "var(--text-secondary)", marginBottom: "0.25rem" }}>Variable Sample Values:</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem" }}>
+                          {detectedVariableKeys.map((k) => (
+                            <span
+                              key={k}
+                              style={{
+                                background: "rgba(99, 102, 241, 0.08)",
+                                border: "1px solid rgba(99, 102, 241, 0.2)",
+                                padding: "0.15rem 0.5rem",
+                                borderRadius: "4px",
+                                fontSize: "0.76rem",
+                              }}
+                            >
+                              <code>&#123;&#123;{k}&#125;&#125;</code>: <strong>{draft.variables[k] || `(missing)`}</strong>
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Explicit User Confirmation */}
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: "0.6rem",
+                      cursor: "pointer",
+                      fontSize: "0.82rem",
+                      color: "var(--text-secondary)",
+                      marginTop: "0.25rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      id="confirm-meta-policy-check"
+                      data-testid="confirm-meta-policy-check"
+                      checked={acknowledgedReview}
+                      onChange={(e) => setAcknowledgedReview(e.target.checked)}
+                      disabled={isSubmittingToMeta}
+                      style={{ marginTop: "2px", cursor: "pointer" }}
+                    />
+                    <span>
+                      I confirm that the template specification and sample values are accurate and comply with Meta WhatsApp Business policies.
+                    </span>
+                  </label>
+                </div>
+                <div className="modal-footer" style={{ borderTop: "1px solid var(--border-subtle)", marginTop: "0.75rem", paddingTop: "0.75rem" }}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setShowSubmitModal(false)}
+                    disabled={isSubmittingToMeta}
+                    id="cancel-submit-meta-btn"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={handleConfirmSubmit}
+                    disabled={!acknowledgedReview || isSubmittingToMeta}
+                    id="confirm-submit-meta-btn"
+                    data-testid="confirm-submit-meta-btn"
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "0.4rem",
+                      opacity: (!acknowledgedReview || isSubmittingToMeta) ? 0.6 : 1,
+                    }}
+                  >
+                    {isSubmittingToMeta ? (
+                      <>
+                        <Loader2 size={14} className="animate-spin" />
+                        <span>Submitting to Meta...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send size={14} />
+                        <span>Confirm &amp; Submit to Meta</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -1042,6 +1623,24 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
                 >
                   <Save size={14} style={{ marginRight: "0.35rem" }} />
                   <span>Save Local Draft</span>
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleOpenSubmitModal}
+                  id="submit-meta-btn"
+                  data-testid="submit-meta-btn"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.4rem",
+                    background: "linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%)",
+                    color: "#ffffff",
+                    border: "none",
+                  }}
+                >
+                  <Send size={14} />
+                  <span>Submit to Meta for Review</span>
                 </button>
               </div>
             </div>
@@ -1934,51 +2533,107 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
                             )}
 
                             {btn.type === "URL" && (
-                              <div className="form-group" style={{ gridColumn: "1 / -1" }}>
-                                <label className="form-label">Website URL</label>
-                                <input
-                                  type="url"
-                                  className="form-input"
-                                  value={btn.url || ""}
-                                  onChange={(e) =>
-                                    handleUpdateButton(btn.id, { url: e.target.value })
-                                  }
-                                  placeholder="https://yourstore.com/order"
-                                />
-                                {errors[`btn_${idx}_url`] && (
-                                  <span
-                                    className="input-error"
-                                    style={{ color: "var(--accent-rose)", fontSize: "0.78rem" }}
-                                  >
-                                    {errors[`btn_${idx}_url`]}
-                                  </span>
-                                )}
-                              </div>
+                              <>
+                                <div className="form-group" style={{ gridColumn: "1 / -1" }}>
+                                  <label className="form-label">Website URL</label>
+                                  <input
+                                    type="url"
+                                    className="form-input"
+                                    value={btn.url || ""}
+                                    onChange={(e) =>
+                                      handleUpdateButton(btn.id, { url: e.target.value })
+                                    }
+                                    placeholder="https://yourstore.com/order"
+                                  />
+                                  {errors[`btn_${idx}_url`] && (
+                                    <span
+                                      className="input-error"
+                                      style={{ color: "var(--accent-rose)", fontSize: "0.78rem" }}
+                                    >
+                                      {errors[`btn_${idx}_url`]}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div
+                                  className="button-direction-card"
+                                  data-testid={`button-direction-${idx}`}
+                                  style={{
+                                    gridColumn: "1 / -1",
+                                    padding: "0.55rem 0.75rem",
+                                    background: "rgba(99, 102, 241, 0.05)",
+                                    border: "1px solid rgba(99, 102, 241, 0.2)",
+                                    borderRadius: "var(--radius-sm)",
+                                    fontSize: "0.78rem",
+                                  }}
+                                >
+                                  <div style={{ display: "flex", alignItems: "center", gap: "0.35rem", color: "var(--accent-indigo-light)", fontWeight: 600, marginBottom: "0.2rem" }}>
+                                    <ExternalLink size={13} />
+                                    <span>Direction / Action:</span>
+                                  </div>
+                                  <div style={{ color: "var(--text-secondary)", lineHeight: 1.4 }}>
+                                    Opens this website when the customer taps the button.
+                                  </div>
+                                  {btn.url && (
+                                    <div style={{ marginTop: "0.25rem", fontSize: "0.74rem", color: "var(--text-muted)", wordBreak: "break-all" }}>
+                                      Destination URL: <code style={{ color: "var(--accent-indigo-light)", background: "rgba(255, 255, 255, 0.04)", padding: "0.1rem 0.35rem", borderRadius: "3px" }}>{btn.url}</code>
+                                    </div>
+                                  )}
+                                </div>
+                              </>
                             )}
 
                             {btn.type === "PHONE_NUMBER" && (
-                              <div className="form-group" style={{ gridColumn: "1 / -1" }}>
-                                <label className="form-label">
-                                  Phone Number (E.164 with Country Code)
-                                </label>
-                                <input
-                                  type="tel"
-                                  className="form-input"
-                                  value={btn.phoneNumber || ""}
-                                  onChange={(e) =>
-                                    handleUpdateButton(btn.id, { phoneNumber: e.target.value })
-                                  }
-                                  placeholder="+919876543210"
-                                />
-                                {errors[`btn_${idx}_phone`] && (
-                                  <span
-                                    className="input-error"
-                                    style={{ color: "var(--accent-rose)", fontSize: "0.78rem" }}
-                                  >
-                                    {errors[`btn_${idx}_phone`]}
-                                  </span>
-                                )}
-                              </div>
+                              <>
+                                <div className="form-group" style={{ gridColumn: "1 / -1" }}>
+                                  <label className="form-label">
+                                    Phone Number (E.164 with Country Code)
+                                  </label>
+                                  <input
+                                    type="tel"
+                                    className="form-input"
+                                    value={btn.phoneNumber || ""}
+                                    onChange={(e) =>
+                                      handleUpdateButton(btn.id, { phoneNumber: e.target.value })
+                                    }
+                                    placeholder="+919876543210"
+                                  />
+                                  {errors[`btn_${idx}_phone`] && (
+                                    <span
+                                      className="input-error"
+                                      style={{ color: "var(--accent-rose)", fontSize: "0.78rem" }}
+                                    >
+                                      {errors[`btn_${idx}_phone`]}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div
+                                  className="button-direction-card"
+                                  data-testid={`button-direction-${idx}`}
+                                  style={{
+                                    gridColumn: "1 / -1",
+                                    padding: "0.55rem 0.75rem",
+                                    background: "rgba(16, 185, 129, 0.05)",
+                                    border: "1px solid rgba(16, 185, 129, 0.2)",
+                                    borderRadius: "var(--radius-sm)",
+                                    fontSize: "0.78rem",
+                                  }}
+                                >
+                                  <div style={{ display: "flex", alignItems: "center", gap: "0.35rem", color: "var(--accent-emerald)", fontWeight: 600, marginBottom: "0.2rem" }}>
+                                    <Phone size={13} />
+                                    <span>Direction / Action:</span>
+                                  </div>
+                                  <div style={{ color: "var(--text-secondary)", lineHeight: 1.4 }}>
+                                    Opens the customer&apos;s phone dialer.
+                                  </div>
+                                  {btn.phoneNumber && (
+                                    <div style={{ marginTop: "0.25rem", fontSize: "0.74rem", color: "var(--text-muted)" }}>
+                                      Phone Number: <code style={{ color: "var(--accent-emerald)", background: "rgba(255, 255, 255, 0.04)", padding: "0.1rem 0.35rem", borderRadius: "3px" }}>{btn.phoneNumber}</code>
+                                    </div>
+                                  )}
+                                </div>
+                              </>
                             )}
                           </div>
                         </div>
@@ -1987,98 +2642,127 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
                   </div>
                 )}
 
-                {/* Directions / Action Guidance Section */}
-                <div
-                  className="action-guidance-card"
+                {/* Collapsed Technical Action Guidance & Internal Author Notes */}
+                <details
+                  className="action-guidance-card action-guidance-collapsible"
                   data-testid="action-guidance-card"
                   style={{
                     marginTop: "1.25rem",
-                    padding: "1rem",
-                    background: "rgba(99, 102, 241, 0.04)",
-                    border: "1px solid rgba(99, 102, 241, 0.2)",
+                    background: "rgba(99, 102, 241, 0.03)",
+                    border: "1px solid rgba(99, 102, 241, 0.18)",
                     borderRadius: "var(--radius-md)",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "0.6rem",
+                    overflow: "hidden",
                   }}
                 >
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <Compass size={16} style={{ color: "var(--accent-indigo-light)" }} />
+                  <summary
+                    data-testid="action-guidance-toggle"
+                    style={{
+                      padding: "0.75rem 1rem",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      userSelect: "none",
+                      fontSize: "0.82rem",
+                      fontWeight: 600,
+                      color: "var(--text-primary)",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <Compass size={15} style={{ color: "var(--accent-indigo-light)" }} />
+                      <span>Learn about button actions & internal notes</span>
+                    </div>
+                    <span style={{ fontSize: "0.72rem", color: "var(--accent-indigo-light)", fontWeight: 500 }}>
+                      Expand Details & Notes
+                    </span>
+                  </summary>
+
+                  <div
+                    style={{
+                      padding: "0 1rem 1rem 1rem",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "0.6rem",
+                      borderTop: "1px solid rgba(99, 102, 241, 0.1)",
+                      marginTop: "0.25rem",
+                      paddingTop: "0.75rem",
+                    }}
+                  >
                     <h4
                       style={{
                         margin: 0,
-                        fontSize: "0.88rem",
+                        fontSize: "0.84rem",
                         fontWeight: 600,
                         color: "var(--text-primary)",
                       }}
                     >
                       CTA Directions & Action Guidance
                     </h4>
-                  </div>
-                  <p
-                    style={{
-                      margin: 0,
-                      fontSize: "0.78rem",
-                      color: "var(--text-secondary)",
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    WhatsApp Call-to-Action (CTA) buttons trigger native device actions when tapped by the customer:
-                  </p>
-                  <ul
-                    style={{
-                      margin: 0,
-                      paddingLeft: "1.2rem",
-                      fontSize: "0.76rem",
-                      color: "var(--text-muted)",
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    <li>
-                      <strong style={{ color: "var(--text-primary)" }}>Website URL Buttons:</strong> Open the external URL directly in the customer&apos;s mobile web browser (e.g., Safari or Chrome). Supports dynamic URL paths (e.g. <code>https://brand.com/track/&#123;&#123;1&#125;&#125;</code>).
-                    </li>
-                    <li>
-                      <strong style={{ color: "var(--text-primary)" }}>Phone Number Buttons:</strong> Immediately launch the customer&apos;s native device phone dialer with the prefilled E.164 number.
-                    </li>
-                  </ul>
-                  <div
-                    style={{
-                      padding: "0.5rem 0.75rem",
-                      background: "rgba(245, 158, 11, 0.08)",
-                      border: "1px solid rgba(245, 158, 11, 0.25)",
-                      borderRadius: "var(--radius-sm)",
-                      fontSize: "0.74rem",
-                      color: "var(--accent-amber)",
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    <strong>Important:</strong> These buttons perform direct device actions (browser navigation or phone dialing). They do <em>not</em> send an automated in-chat reply or trigger chatbot follow-ups. Inbound reply-triggered automation is a future platform capability requiring webhook ingestion and conversational action routing.
-                  </div>
-                  <div className="form-group" style={{ marginTop: "0.4rem", margin: 0 }}>
-                    <label
-                      htmlFor="action-guidance-notes"
-                      className="form-label"
-                      style={{ fontSize: "0.78rem" }}
+                    <p
+                      style={{
+                        margin: 0,
+                        fontSize: "0.78rem",
+                        color: "var(--text-secondary)",
+                        lineHeight: 1.5,
+                      }}
                     >
-                      Author Action Notes (Optional Documentation)
-                    </label>
-                    <textarea
-                      id="action-guidance-notes"
-                      data-testid="action-guidance-notes"
-                      className="form-input"
-                      rows={2}
-                      placeholder="e.g. Tapping Visit Website opens product landing page with campaign tracking UTM..."
-                      value={draft.actionGuidance || ""}
-                      onChange={(e) =>
-                        setDraft((prev) => ({ ...prev, actionGuidance: e.target.value }))
-                      }
-                      style={{ fontSize: "0.78rem", resize: "vertical" }}
-                    />
-                    <span className="input-hint" style={{ fontSize: "0.7rem" }}>
-                      Internal documentation for marketing and support teams. Not visible to end customers on WhatsApp.
-                    </span>
+                      WhatsApp Call-to-Action (CTA) buttons trigger native device actions when tapped by the customer:
+                    </p>
+                    <ul
+                      style={{
+                        margin: 0,
+                        paddingLeft: "1.2rem",
+                        fontSize: "0.76rem",
+                        color: "var(--text-muted)",
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      <li>
+                        <strong style={{ color: "var(--text-primary)" }}>Website URL Buttons:</strong> Open the external URL directly in the customer&apos;s mobile web browser (e.g., Safari or Chrome). Supports dynamic URL paths (e.g. <code>https://brand.com/track/&#123;&#123;1&#125;&#125;</code>).
+                      </li>
+                      <li>
+                        <strong style={{ color: "var(--text-primary)" }}>Phone Number Buttons:</strong> Immediately launch the customer&apos;s native device phone dialer with the prefilled E.164 number.
+                      </li>
+                    </ul>
+                    <div
+                      style={{
+                        padding: "0.5rem 0.75rem",
+                        background: "rgba(245, 158, 11, 0.08)",
+                        border: "1px solid rgba(245, 158, 11, 0.25)",
+                        borderRadius: "var(--radius-sm)",
+                        fontSize: "0.74rem",
+                        color: "var(--accent-amber)",
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      <strong>Important:</strong> These buttons perform direct device actions (browser navigation or phone dialing). They do <em>not</em> send an automated in-chat reply or trigger chatbot follow-ups. Inbound reply-triggered automation is a future platform capability requiring webhook ingestion and conversational action routing.
+                    </div>
+                    <div className="form-group" style={{ marginTop: "0.4rem", margin: 0 }}>
+                      <label
+                        htmlFor="action-guidance-notes"
+                        className="form-label"
+                        style={{ fontSize: "0.78rem" }}
+                      >
+                        Author Action Notes (Optional Documentation)
+                      </label>
+                      <textarea
+                        id="action-guidance-notes"
+                        data-testid="action-guidance-notes"
+                        className="form-input"
+                        rows={2}
+                        placeholder="e.g. Tapping Visit Website opens product landing page with campaign tracking UTM..."
+                        value={draft.actionGuidance || ""}
+                        onChange={(e) =>
+                          setDraft((prev) => ({ ...prev, actionGuidance: e.target.value }))
+                        }
+                        style={{ fontSize: "0.78rem", resize: "vertical" }}
+                      />
+                      <span className="input-hint" style={{ fontSize: "0.7rem" }}>
+                        🔒 Internal documentation for marketing and support teams only. Never sent to WhatsApp or Meta.
+                      </span>
+                    </div>
                   </div>
-                </div>
+                </details>
               </section>
             </div>
           </div>

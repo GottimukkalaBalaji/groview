@@ -48,3 +48,12 @@ export function setAllowedTestTemplates(templates: string[] | null): void {
   }
 }
 
+export function addAllowedTestTemplate(templateName: string): void {
+  if (!templateName || typeof templateName !== "string") return;
+  const trimmed = templateName.trim();
+  if (!activeAllowedTemplates.includes(trimmed)) {
+    activeAllowedTemplates.push(trimmed);
+  }
+}
+
+

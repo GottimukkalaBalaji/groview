@@ -13,6 +13,8 @@ import {
   resolvePositionalTemplateParameters,
 } from "./templateParameterMapping.js";
 import { MetaConfigResolver, ResolvedMetaConfig } from "./metaConfigResolver.js";
+import { CreateTemplateInput } from "../validators/template.validator.js";
+import { addAllowedTestTemplate } from "../constants/templateAllowlist.js";
 
 interface CacheEntry {
   templates: NormalizedWhatsAppTemplate[];
@@ -321,6 +323,184 @@ export class WhatsAppTemplateService {
 
     return { templates: normalized, summary };
   }
+
+  /**
+   * Submits a custom WhatsApp message template to Meta WhatsApp Cloud API for review.
+   *
+   * @param organizationId - Trusted tenant organization ID
+   * @param payload - Validated template specification (name, category, language, components)
+   */
+  public async createTemplate(
+    organizationId: string,
+    payload: CreateTemplateInput
+  ): Promise<{
+    id: string;
+    name: string;
+    status: string;
+    category: string;
+    language: string;
+  }> {
+    const org = (organizationId || "").trim();
+    if (!org) {
+      throw new AppError(
+        "A valid organizationId is required to create a template",
+        400,
+        "INVALID_ORGANIZATION_ID"
+      );
+    }
+
+    let metaConfig: ResolvedMetaConfig;
+    try {
+      metaConfig = await MetaConfigResolver.resolveOutboundConfig(org);
+    } catch (err: unknown) {
+      if (err instanceof AppError) throw err;
+      const msg = err instanceof Error ? err.message : "Meta configuration missing";
+      logger.error(`[WhatsAppTemplateService] Meta credentials unconfigured for organization ${org}: ${msg}`);
+      throw new AppError(
+        "WhatsApp Cloud API is not configured. Please check backend environment settings or connect in Settings.",
+        503,
+        "META_CONFIG_UNAVAILABLE"
+      );
+    }
+
+    const { accessToken, wabaId, graphApiVersion } = metaConfig;
+    const version = graphApiVersion || "v22.0";
+    const maskedWabaId = wabaId.length > 4 ? `***${wabaId.slice(-4)}` : "***";
+
+    logger.info(
+      `[WhatsAppTemplateService] Submitting template "${payload.name}" to Meta WABA (ID: ${maskedWabaId}, Graph API: ${version}) for organization ${org}`
+    );
+
+    const url = `https://graph.facebook.com/${version}/${wabaId}/message_templates`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s network timeout
+
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          name: payload.name,
+          category: payload.category,
+          language: payload.language,
+          components: payload.components,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      const data = (await response.json()) as {
+        id?: string;
+        status?: string;
+        category?: string;
+        error?: {
+          message?: string;
+          code?: number;
+          error_subcode?: number;
+          type?: string;
+        };
+      };
+
+      if (!response.ok) {
+        const errCode = data.error?.code;
+        const subCode = data.error?.error_subcode;
+        const rawErrMsg = data.error?.message || `HTTP ${response.status} from Meta Graph API`;
+        const sanitizedErrMsg = rawErrMsg
+          .replace(/EAA[a-zA-Z0-9._-]+/g, "[REDACTED_TOKEN]")
+          .replace(/Bearer\s+[a-zA-Z0-9._-]+/gi, "Bearer [REDACTED]");
+
+        logger.error(
+          `[WhatsAppTemplateService] Meta template submission failed [Code: ${errCode}, Subcode: ${subCode}]: ${sanitizedErrMsg}`
+        );
+
+        if (errCode === 190) {
+          throw new AppError(
+            "Meta WhatsApp access token has expired or is invalid. Please refresh META_WHATSAPP_ACCESS_TOKEN in backend/.env or your WhatsApp connection in Settings.",
+            401,
+            "META_AUTH_EXPIRED"
+          );
+        }
+
+        if (
+          subCode === 2388042 ||
+          (errCode === 100 && (sanitizedErrMsg.toLowerCase().includes("already exists") || sanitizedErrMsg.toLowerCase().includes("duplicate")))
+        ) {
+          throw new AppError(
+            `A template with the name "${payload.name}" already exists in language "${payload.language}" on this Meta WhatsApp Business Account. Please use a unique template name.`,
+            409,
+            "TEMPLATE_NAME_EXISTS"
+          );
+        }
+
+        if (errCode === 200 || errCode === 10 || sanitizedErrMsg.toLowerCase().includes("permission")) {
+          throw new AppError(
+            "Insufficient Meta permissions to create message templates. Ensure your access token has the whatsapp_business_management permission.",
+            403,
+            "META_PERMISSION_DENIED"
+          );
+        }
+
+        if (errCode === 4 || errCode === 80007) {
+          throw new AppError(
+            "Meta API rate limit reached. Please wait a few moments before submitting again.",
+            429,
+            "META_RATE_LIMITED"
+          );
+        }
+
+        throw new AppError(
+          `Meta rejected template submission: ${sanitizedErrMsg}`,
+          502,
+          "META_API_ERROR"
+        );
+      }
+
+      const templateId = String(data.id || "").trim();
+      const status = String(data.status || "PENDING").trim();
+
+      logger.info(
+        `[WhatsAppTemplateService] Template "${payload.name}" successfully created at Meta (ID: ${templateId}, Status: ${status}) for organization ${org}`
+      );
+
+      // Invalidate target organization cache so subsequent reads refresh from Meta
+      this.invalidateCache(org);
+
+      // Dynamically add to allowlist so it is not filtered out during testing
+      addAllowedTestTemplate(payload.name);
+
+      return {
+        id: templateId,
+        name: payload.name,
+        status,
+        category: data.category || payload.category,
+        language: payload.language,
+      };
+    } catch (err: unknown) {
+      clearTimeout(timeout);
+      if (err instanceof AppError) throw err;
+      if (err instanceof Error && err.name === "AbortError") {
+        throw new AppError(
+          "Meta Cloud API request timed out after 10 seconds. Do not retry immediately as the template may have already reached Meta.",
+          504,
+          "META_API_TIMEOUT"
+        );
+      }
+      const message = err instanceof Error ? err.message : "Unknown network error";
+      logger.error(`[WhatsAppTemplateService] Network error submitting template to Meta: ${message}`);
+      throw new AppError(
+        `Unable to connect to WhatsApp Cloud API: ${message}`,
+        502,
+        "META_NETWORK_ERROR"
+      );
+    }
+  }
+
 
   /**
    * Retrieves a single template by name for a specific organization

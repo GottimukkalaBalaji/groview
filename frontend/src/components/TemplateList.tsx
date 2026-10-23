@@ -11,8 +11,11 @@ import {
   Sparkles,
   Info,
   Plus,
+  Edit3,
+  Trash2,
 } from "lucide-react";
 import { WhatsAppTemplate, TemplateSyncSummary } from "../types/template.js";
+import { WhatsAppMessageBubble } from "./WhatsAppMessageBubble.js";
 import { isAllowedTestTemplate, getFriendlyTemplateName } from "../constants/templateAllowlist.js";
 
 interface TemplateListProps {
@@ -27,6 +30,8 @@ interface TemplateListProps {
   canCreateTemplate?: boolean;
   onCreateNew?: () => void;
   onDuplicate?: (template: WhatsAppTemplate) => void;
+  onEditDraft?: (template: WhatsAppTemplate) => void;
+  onDeleteDraft?: (draftName: string) => void;
 }
 
 export const TemplateList: React.FC<TemplateListProps> = ({
@@ -40,14 +45,19 @@ export const TemplateList: React.FC<TemplateListProps> = ({
   onRetry,
   canCreateTemplate = false,
   onCreateNew,
+  onEditDraft,
+  onDeleteDraft,
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
   const [selectedStatus, setSelectedStatus] = useState<string>("ALL");
 
-  const allowlistedTemplates = templates.filter((tpl) => isAllowedTestTemplate(tpl.name));
+  // Keep authorized Meta test templates and ALL locally saved drafts
+  const visibleTemplates = templates.filter(
+    (tpl) => tpl.isLocalDraft || tpl.status === "LOCAL_DRAFT" || isAllowedTestTemplate(tpl.name)
+  );
 
-  const filtered = allowlistedTemplates.filter((tpl) => {
+  const filtered = visibleTemplates.filter((tpl) => {
     const matchesSearch =
       tpl.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       tpl.body.toLowerCase().includes(searchTerm.toLowerCase());
@@ -56,11 +66,51 @@ export const TemplateList: React.FC<TemplateListProps> = ({
       selectedStatus === "ALL" ||
       (selectedStatus === "SENDABLE"
         ? tpl.status === "APPROVED" && tpl.isSendable !== false
+        : selectedStatus === "LOCAL_DRAFT"
+        ? tpl.status === "LOCAL_DRAFT" || tpl.isLocalDraft
         : tpl.status === selectedStatus);
     return matchesSearch && matchesCategory && matchesStatus;
   });
 
   const getStatusBadge = (tpl: WhatsAppTemplate) => {
+    if (tpl.status === "LOCAL_DRAFT" || tpl.isLocalDraft) {
+      return (
+        <div style={{ display: "flex", gap: "0.35rem", alignItems: "center", flexWrap: "wrap" }}>
+          <span
+            className="status-pill status-local-draft"
+            style={{
+              background: "rgba(99, 102, 241, 0.12)",
+              color: "var(--accent-indigo-light)",
+              border: "1px solid rgba(99, 102, 241, 0.3)",
+              fontWeight: 600,
+              fontSize: "0.74rem",
+              padding: "0.2rem 0.5rem",
+              borderRadius: "var(--radius-full)",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "0.3rem",
+            }}
+          >
+            <FileText size={12} />
+            <span>Local Draft</span>
+          </span>
+          <span
+            className="status-sub-pill"
+            style={{
+              background: "rgba(245, 158, 11, 0.15)",
+              color: "var(--accent-amber)",
+              fontWeight: 600,
+              fontSize: "0.68rem",
+              padding: "0.15rem 0.45rem",
+              borderRadius: "var(--radius-full)",
+            }}
+          >
+            Pending Meta Submission
+          </span>
+        </div>
+      );
+    }
+
     switch (tpl.status) {
       case "APPROVED":
         return (
@@ -233,7 +283,15 @@ export const TemplateList: React.FC<TemplateListProps> = ({
           <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <Sparkles size={16} color="var(--accent-emerald)" />
             <span>
-              <strong>Verified WhatsApp Templates:</strong> {allowlistedTemplates.length} campaign template{allowlistedTemplates.length === 1 ? "" : "s"} ready for broadcast.
+              <strong>Verified WhatsApp Templates:</strong>{" "}
+              {visibleTemplates.filter((t) => t.status === "APPROVED" && isAllowedTestTemplate(t.name)).length} campaign template
+              {visibleTemplates.filter((t) => t.status === "APPROVED" && isAllowedTestTemplate(t.name)).length === 1 ? "" : "s"} ready for broadcast.
+              {visibleTemplates.filter((t) => t.isLocalDraft || t.status === "LOCAL_DRAFT").length > 0 && (
+                <span style={{ color: "var(--accent-indigo-light)", marginLeft: "0.35rem" }}>
+                  ({visibleTemplates.filter((t) => t.isLocalDraft || t.status === "LOCAL_DRAFT").length} local draft
+                  {visibleTemplates.filter((t) => t.isLocalDraft || t.status === "LOCAL_DRAFT").length === 1 ? "" : "s"} pending Meta)
+                </span>
+              )}
             </span>
           </div>
           <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
@@ -304,6 +362,7 @@ export const TemplateList: React.FC<TemplateListProps> = ({
               aria-label="Filter by status"
             >
               <option value="ALL">All Statuses</option>
+              <option value="LOCAL_DRAFT">Local Drafts (Pending Meta)</option>
               <option value="SENDABLE">Approved & Sendable</option>
               <option value="APPROVED">Approved on Meta</option>
               <option value="PENDING">In Review</option>
@@ -311,6 +370,29 @@ export const TemplateList: React.FC<TemplateListProps> = ({
             </select>
           </div>
         </div>
+      </div>
+
+      {/* Browser Local Storage Information Notice */}
+      <div
+        className="browser-storage-notice"
+        data-testid="browser-storage-notice"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "0.5rem",
+          background: "rgba(99, 102, 241, 0.04)",
+          border: "1px solid rgba(99, 102, 241, 0.15)",
+          borderRadius: "var(--radius-sm)",
+          padding: "0.55rem 0.85rem",
+          fontSize: "0.76rem",
+          color: "var(--text-secondary)",
+          marginBottom: "1.25rem",
+        }}
+      >
+        <Info size={14} style={{ color: "var(--accent-indigo-light)", flexShrink: 0 }} />
+        <span>
+          <strong>Local Drafts Notice:</strong> Saved template drafts are stored in this browser profile and are pending submission to Meta. They are visible only on this browser/profile and are not yet shared across different users or devices.
+        </span>
       </div>
 
       {/* Templates Grid / Cards / Empty States */}
@@ -322,7 +404,7 @@ export const TemplateList: React.FC<TemplateListProps> = ({
             Synchronizing authorized templates from Meta Cloud API
           </p>
         </div>
-      ) : templates.length === 0 ? (
+      ) : visibleTemplates.length === 0 ? (
         <div className="empty-templates-card" style={{ padding: "3.5rem 1.5rem", textAlign: "center" }}>
           <FileText size={44} color="var(--text-muted)" style={{ margin: "0 auto 1rem auto" }} />
           <h3>No approved WhatsApp templates available</h3>
@@ -356,19 +438,24 @@ export const TemplateList: React.FC<TemplateListProps> = ({
       ) : (
         <div className="templates-grid">
           {filtered.map((template) => {
+            const isLocal = template.isLocalDraft || template.status === "LOCAL_DRAFT";
             const isNonSendable = template.status !== "APPROVED" || template.isSendable === false;
 
             return (
               <div
                 key={template.id}
                 className={`template-card ${isNonSendable ? "template-card-non-sendable" : ""}`}
-                style={isNonSendable ? { opacity: 0.88, borderColor: "rgba(255, 255, 255, 0.08)" } : undefined}
-                onClick={() => onSelectTemplate(template)}
+                style={isNonSendable ? { opacity: 0.95, borderColor: isLocal ? "rgba(99, 102, 241, 0.3)" : "rgba(255, 255, 255, 0.08)" } : undefined}
+                onClick={() => (isLocal && onEditDraft ? onEditDraft(template) : onSelectTemplate(template))}
                 tabIndex={0}
                 role="button"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
-                    onSelectTemplate(template);
+                    if (isLocal && onEditDraft) {
+                      onEditDraft(template);
+                    } else {
+                      onSelectTemplate(template);
+                    }
                   }
                 }}
               >
@@ -381,40 +468,81 @@ export const TemplateList: React.FC<TemplateListProps> = ({
                       <span className="template-name">{getFriendlyTemplateName(template.name)}</span>
                       <span className="lang-tag">{template.language}</span>
                     </div>
-                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.25rem" }}>
+                    <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.25rem", flexWrap: "wrap" }}>
                       <code style={{ fontSize: "0.72rem", color: "var(--text-muted)", background: "rgba(255, 255, 255, 0.04)", padding: "0.1rem 0.35rem", borderRadius: "4px" }}>
                         {template.name}
                       </code>
                       <span className="category-tag">{template.category}</span>
+                      <span
+                        className="header-type-tag"
+                        style={{
+                          fontSize: "0.7rem",
+                          color: "var(--text-muted)",
+                          background: "rgba(255, 255, 255, 0.03)",
+                          padding: "0.1rem 0.35rem",
+                          borderRadius: "4px",
+                          border: "1px solid var(--border-subtle)",
+                        }}
+                      >
+                        Header: {template.header?.type || template.header?.format || "NONE"}
+                      </span>
                     </div>
                   </div>
                   {getStatusBadge(template)}
                 </div>
 
-                {/* Message Snippet */}
-                <div className="template-card-body">
-                  <p className="template-snippet">{template.body}</p>
+                {/* WhatsApp Message Preview Bubble inside Card */}
+                <div className="template-card-preview-area" data-testid={`template-card-preview-${template.id}`}>
+                  <div className="wa-card-canvas">
+                    <WhatsAppMessageBubble template={template} compact showSampleValues={true} />
+                  </div>
                 </div>
 
                 {/* Card Meta & Buttons */}
                 <div className="template-card-footer">
                   <span className="template-date">
-                    {template.lastUpdated
+                    {isLocal
+                      ? `Saved locally ${template.lastUpdated ? new Date(template.lastUpdated).toLocaleDateString() : "recently"}`
+                      : template.lastUpdated
                       ? `Updated ${new Date(template.lastUpdated).toLocaleDateString()}`
                       : "Active on Meta WABA"}
                   </span>
 
                   <div className="card-actions" onClick={(e) => e.stopPropagation()}>
+                    {isLocal && onEditDraft && (
+                      <button
+                        type="button"
+                        className="btn-card-action btn-action-edit"
+                        onClick={() => onEditDraft(template)}
+                        title="Edit Local Draft in Template Studio"
+                        aria-label={`Edit ${template.name}`}
+                      >
+                        <Edit3 size={14} />
+                        <span>Edit Draft</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn-card-action btn-action-edit"
                       onClick={() => onSelectTemplate(template)}
                       title="Inspect Template & Live Phone Preview"
-                      aria-label={`View ${template.name}`}
+                      aria-label={`${isLocal ? "Preview" : "View"} ${template.name}`}
                     >
                       <Eye size={14} />
-                      <span>View & Preview</span>
+                      <span>{isLocal ? "Preview" : "View & Preview"}</span>
                     </button>
+                    {isLocal && onDeleteDraft && (
+                      <button
+                        type="button"
+                        className="btn-card-action btn-action-delete"
+                        onClick={() => onDeleteDraft(template.name)}
+                        title="Delete Local Draft"
+                        aria-label={`Delete ${template.name}`}
+                        style={{ color: "var(--accent-rose)", border: "none", background: "transparent", cursor: "pointer", padding: "0.2rem" }}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>

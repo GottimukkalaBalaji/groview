@@ -1233,8 +1233,47 @@ export class CampaignService {
 
     // 7. If zero eligible recipients remain, reject fail-closed without mutating campaign
     if (eligibleCount === 0) {
+      const details: Array<{ field?: string; message: string }> = [];
+      if (excludedConsentCount > 0) {
+        details.push({
+          field: "consent",
+          message: `${excludedConsentCount} contact(s) excluded due to non-opted-in consent status (must be OPTED_IN)`,
+        });
+      }
+      if (excludedSuppressedCount > 0) {
+        details.push({
+          field: "suppression",
+          message: `${excludedSuppressedCount} contact(s) excluded because they are suppressed / opted out`,
+        });
+      }
+      if (excludedPhoneCount > 0) {
+        details.push({
+          field: "phone",
+          message: `${excludedPhoneCount} contact(s) excluded due to invalid E.164 phone number`,
+        });
+      }
+      if (excludedVariablesCount > 0) {
+        const sampleReason = sampleExclusions.find(
+          (s) =>
+            s.reason.includes("parameter") ||
+            s.reason.includes("attribute") ||
+            s.reason.includes("variable")
+        )?.reason;
+        details.push({
+          field: "templateVariables",
+          message: `${excludedVariablesCount} contact(s) excluded due to unresolvable template parameters${
+            sampleReason ? `: ${sampleReason}` : ""
+          }`,
+        });
+      }
+
+      logger.warn(
+        `[CampaignLaunch] Zero eligible recipients for campaign ${campaign.id} (${campaign.name}). Total audience: ${members.length}. Exclusions: consent=${excludedConsentCount}, suppressed=${excludedSuppressedCount}, phone=${excludedPhoneCount}, variables=${excludedVariablesCount}`
+      );
+
       throw new BadRequestError(
-        "No eligible recipients found in audience list. All contacts were excluded due to consent, suppression, invalid phone numbers, or missing template parameters."
+        "No eligible recipients found in audience list. All contacts were excluded due to consent, suppression, invalid phone numbers, or missing template parameters.",
+        details
       );
     }
 

@@ -617,6 +617,8 @@ describe("Phase 10 — Step 1: Backend Campaign Dispatch Orchestrator Tests", ()
 
       expect(res.status).toBe(400);
       expect(res.body.error?.message).toContain("No eligible recipients found in audience list");
+      expect(Array.isArray(res.body.error?.details)).toBe(true);
+      expect(res.body.error?.details.some((d: any) => d.field === "consent" && d.message.includes("2 contact(s) excluded"))).toBe(true);
       // Campaign status must remain DRAFT (unmutated)
       expect(campaignsStore[0].status).toBe(CampaignStatus.DRAFT);
     });
@@ -625,6 +627,27 @@ describe("Phase 10 — Step 1: Backend Campaign Dispatch Orchestrator Tests", ()
   // ── 5. Template Parameter Resolution & Missing Variables ────────────────────
 
   describe("Template Parameter Resolution & Auditable Exclusions", () => {
+    it("correctly resolves {{contact.firstName}}, static strings, and custom attributes per contact", async () => {
+      seedCampaign({
+        variablesMapping: {
+          "1": "{{contact.firstName}}",
+          "2": "₹500 OFF",
+        },
+      });
+      seedMember({ firstName: "Priya", phoneNumber: "+919812345678" });
+
+      const res = await request(app).post("/api/v1/campaigns/cmp_test_001/send");
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.eligibleCount).toBe(1);
+      expect(messagesStore.length).toBe(1);
+      expect(messagesStore[0].parameters).toEqual({
+        "1": "Priya",
+        "2": "₹500 OFF",
+      });
+      expect(messagesStore[0].recipientPhone).toBe("+919812345678");
+    });
+
     it("correctly resolves {{firstName}}, static strings, and custom attributes per contact", async () => {
       seedCampaign({
         variablesMapping: {

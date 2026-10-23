@@ -571,6 +571,19 @@ export class ApiClient {
     );
   }
 
+  /**
+   * Submits a new custom template to Meta WhatsApp Cloud API for review
+   */
+  public async createTemplate(
+    payload: import("../types/template.js").SubmitTemplatePayload
+  ): Promise<ApiResponse<import("../types/template.js").SubmittedTemplateResponse>> {
+    return this.request<ApiResponse<import("../types/template.js").SubmittedTemplateResponse>>("/templates", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+
   // ============================================================================
   // Phase 6D: WhatsApp Channel Integration Management API Methods
   // ============================================================================

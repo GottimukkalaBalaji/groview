@@ -58,6 +58,20 @@ export const templateController = {
   },
 
   /**
+   * Submits a new custom template to Meta WhatsApp Cloud API for review.
+   */
+  async create(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const organizationId = requireOrganizationId(req);
+      const result = await whatsappTemplateService.createTemplate(organizationId, req.body);
+      sendSuccess(res, result, 201, "Template successfully submitted to Meta for review");
+    } catch (error) {
+      next(error);
+    }
+  },
+
+
+  /**
    * Forces an immediate synchronization of templates from Meta WABA for the authenticated organization.
    * Restricts synchronized output to the exact testing allowlist.
    */

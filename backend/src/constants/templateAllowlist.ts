@@ -40,3 +40,15 @@ export function setAllowedTestTemplates(templates: string[] | null): void {
     activeAllowedTemplates = [...templates];
   }
 }
+
+/**
+ * Dynamically appends a newly submitted or approved template name to the active allowlist.
+ */
+export function addAllowedTestTemplate(templateName: string): void {
+  if (!templateName || typeof templateName !== "string") return;
+  const trimmed = templateName.trim();
+  if (!activeAllowedTemplates.includes(trimmed)) {
+    activeAllowedTemplates.push(trimmed);
+  }
+}
+

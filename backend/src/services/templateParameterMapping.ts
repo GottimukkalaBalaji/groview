@@ -282,36 +282,62 @@ export function resolveContactTemplateParameters(
 
   // Helper to extract value from contact
   const resolveTokenFromContact = (token: string): string | null => {
-    const lower = token.toLowerCase();
-    if (lower === "firstname") return contact?.firstName || null;
-    if (lower === "lastname") return contact?.lastName || null;
-    if (lower === "name" || lower === "fullname" || lower === "customername") {
-      const parts = [contact?.firstName, contact?.lastName].filter(Boolean);
-      return parts.length > 0 ? parts.join(" ") : contact?.firstName || null;
-    }
-    if (lower === "phone" || lower === "phonenumber") return contact?.phoneNumber || null;
-    if (lower === "email") return contact?.email || null;
+    if (!token || typeof token !== "string") return null;
 
+    // 1. Strip namespace prefixes like "contact.", "recipient.", "user.", "customer."
+    const strippedPrefix = token.replace(/^(contact|recipient|user|customer)\./i, "").trim();
+
+    // 2. Normalize by removing separators like underscore, hyphen, space and lowercase
+    const lower = strippedPrefix.toLowerCase().replace(/[\-_\s]/g, "");
+
+    // Direct first name aliases
+    if (lower === "firstname" || lower === "first") {
+      return contact?.firstName?.trim() || null;
+    }
+    // Direct last name aliases
+    if (lower === "lastname" || lower === "last") {
+      return contact?.lastName?.trim() || null;
+    }
+    // Full name / name aliases
+    if (lower === "name" || lower === "fullname" || lower === "customername") {
+      const parts = [contact?.firstName?.trim(), contact?.lastName?.trim()].filter(Boolean);
+      return parts.length > 0 ? parts.join(" ") : contact?.firstName?.trim() || null;
+    }
+    // Phone aliases
+    if (lower === "phone" || lower === "phonenumber") {
+      return contact?.phoneNumber?.trim() || null;
+    }
+    // Email aliases
+    if (lower === "email" || lower === "emailaddress") {
+      return contact?.email?.trim() || null;
+    }
+
+    // 3. Custom attributes / attributes lookup
     const attrs =
-      (contact?.attributes && typeof contact.attributes === "object"
-        ? (contact.attributes as Record<string, unknown>)
-        : undefined) ||
       (contact?.customAttributes && typeof contact.customAttributes === "object"
         ? (contact.customAttributes as Record<string, unknown>)
+        : undefined) ||
+      (contact?.attributes && typeof contact.attributes === "object"
+        ? (contact.attributes as Record<string, unknown>)
         : undefined);
 
     if (attrs) {
       if (attrs[token] !== undefined && attrs[token] !== null) {
-        return String(attrs[token]);
+        return String(attrs[token]).trim();
       }
-      const stripped = token.replace(/^(attributes|customattributes)\./i, "");
-      if (attrs[stripped] !== undefined && attrs[stripped] !== null) {
-        return String(attrs[stripped]);
+      if (attrs[strippedPrefix] !== undefined && attrs[strippedPrefix] !== null) {
+        return String(attrs[strippedPrefix]).trim();
       }
-      const strippedLower = stripped.toLowerCase();
-      const matchedKey = Object.keys(attrs).find((k) => k.toLowerCase() === strippedLower);
+      const strippedAttr = strippedPrefix.replace(/^(attributes|customattributes)\./i, "").trim();
+      if (attrs[strippedAttr] !== undefined && attrs[strippedAttr] !== null) {
+        return String(attrs[strippedAttr]).trim();
+      }
+      const strippedLower = strippedAttr.toLowerCase().replace(/[\-_\s]/g, "");
+      const matchedKey = Object.keys(attrs).find(
+        (k) => k.toLowerCase().replace(/[\-_\s]/g, "") === strippedLower
+      );
       if (matchedKey && attrs[matchedKey] !== undefined && attrs[matchedKey] !== null) {
-        return String(attrs[matchedKey]);
+        return String(attrs[matchedKey]).trim();
       }
     }
     return null;
@@ -346,7 +372,7 @@ export function resolveContactTemplateParameters(
       }
 
       const valStr = String(mappedValue).trim();
-      const placeholderMatch = valStr.match(/^\{\{([a-zA-Z0-9_\.]+)\}\}$/);
+      const placeholderMatch = valStr.match(/^\{\{([a-zA-Z0-9_\.\-]+)\}\}$/);
 
       if (placeholderMatch) {
         const token = placeholderMatch[1];
@@ -373,7 +399,7 @@ export function resolveContactTemplateParameters(
     for (const [key, rawVal] of Object.entries(rawMapping)) {
       if (rawVal === undefined || rawVal === null) continue;
       const valStr = String(rawVal).trim();
-      const placeholderMatch = valStr.match(/^\{\{([a-zA-Z0-9_\.]+)\}\}$/);
+      const placeholderMatch = valStr.match(/^\{\{([a-zA-Z0-9_\.\-]+)\}\}$/);
 
       if (placeholderMatch) {
         const token = placeholderMatch[1];
@@ -581,7 +607,7 @@ export function validateCampaignTemplateMapping(
     // 6. Validate placeholder value syntax
     const valStr = String(val).trim();
     if (valStr.includes("{{") || valStr.includes("}}")) {
-      const match = valStr.match(/^\{\{([a-zA-Z0-9_\.]+)\}\}$/);
+      const match = valStr.match(/^\{\{([a-zA-Z0-9_\.\-]+)\}\}$/);
       if (!match) {
         return {
           valid: false,

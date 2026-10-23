@@ -1245,7 +1245,7 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
                     </span>
                   </div>
                   {selectedTemplate.variables.map((v) => {
-                    const currentVal = variablesMapping[v.key] ?? v.sampleValue ?? "";
+                    const currentVal = variablesMapping[v.key] ?? "";
                     const isMissing = !currentVal || currentVal.trim().length === 0;
                     return (
                       <div key={v.key} className="variable-input-row">
@@ -1263,7 +1263,7 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
                             </label>
 
                             {/* Contact attribute quick-mapping presets */}
-                            <div style={{ display: "flex", gap: "0.35rem" }}>
+                            <div style={{ display: "flex", gap: "0.35rem", flexWrap: "wrap" }}>
                               <button
                                 type="button"
                                 style={{
@@ -1312,6 +1312,24 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
                               >
                                 + Phone
                               </button>
+                              {v.sampleValue && !v.sampleValue.startsWith("{{") && (
+                                <button
+                                  type="button"
+                                  style={{
+                                    fontSize: "0.7rem",
+                                    padding: "0.15rem 0.45rem",
+                                    borderRadius: "4px",
+                                    border: "1px solid var(--border-subtle)",
+                                    background: "var(--bg-glass-card)",
+                                    color: "var(--accent-indigo-light)",
+                                    cursor: "pointer",
+                                  }}
+                                  onClick={() => handleVariableChange(v.key, v.sampleValue!)}
+                                  title={`Use sample value "${v.sampleValue}"`}
+                                >
+                                  + Sample ({v.sampleValue})
+                                </button>
+                              )}
                             </div>
                           </div>
 
@@ -1321,7 +1339,7 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
                             className={`form-input ${isMissing ? "form-input-error" : ""}`}
                             value={currentVal}
                             onChange={(e) => handleVariableChange(v.key, e.target.value)}
-                            placeholder={v.label ? `Enter value or mapping for ${v.label}` : `Value for {{${v.key}}}`}
+                            placeholder={v.sampleValue ? `e.g. ${v.sampleValue}` : (v.label ? `Enter value or mapping for ${v.label}` : `Value for {{${v.key}}}`)}
                           />
                           {isMissing && (
                             <span style={{ fontSize: "0.75rem", color: "var(--accent-crimson)", marginTop: "0.2rem", display: "block" }}>

@@ -1,13 +1,96 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Smartphone, ArrowLeft, FileText } from "lucide-react";
 import { WhatsAppTemplate, TemplateSyncSummary } from "../types/template.js";
 import { TemplateList } from "../components/TemplateList.js";
 import { TemplateEditor } from "../components/TemplateEditor.js";
-import { TemplateStudioAuthoring } from "../components/TemplateStudioAuthoring.js";
+import { TemplateStudioAuthoring, DRAFTS_STORAGE_KEY } from "../components/TemplateStudioAuthoring.js";
 import { WhatsAppPhonePreview } from "../components/WhatsAppPhonePreview.js";
 import { apiClient } from "../services/api.js";
-import { isAllowedTestTemplate } from "../constants/templateAllowlist.js";
+import { isAllowedTestTemplate, addAllowedTestTemplate } from "../constants/templateAllowlist.js";
 import { useAuth } from "../context/AuthContext.js";
+
+export function parseLocalDrafts(raw: string | null): WhatsAppTemplate[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    const list = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object"
+      ? [parsed]
+      : [];
+
+    return list
+      .filter((d) => d && typeof d === "object" && (d.name || d.body))
+      .map((d: any, idx: number) => {
+        const varKeys =
+          d.variables && typeof d.variables === "object"
+            ? Array.isArray(d.variables)
+              ? d.variables.map((v: any) => v.key || String(v))
+              : Object.keys(d.variables)
+            : [];
+
+        const templateVariables = varKeys.map((k: string) => ({
+          key: k,
+          fallbackValue:
+            (d.variables && !Array.isArray(d.variables) && d.variables[k]) ||
+            `Value {{${k}}}`,
+          sampleValue:
+            (d.variables && !Array.isArray(d.variables) && d.variables[k]) ||
+            `Sample {{${k}}}`,
+        }));
+
+        const isMedia =
+          d.headerType === "IMAGE" ||
+          d.headerType === "VIDEO" ||
+          d.headerType === "DOCUMENT";
+
+        return {
+          id: d.id || `local-draft-${d.name || idx}`,
+          name: d.name || `draft_${idx + 1}`,
+          language: d.language || "en_US",
+          category: d.category || "MARKETING",
+          status: "LOCAL_DRAFT" as const,
+          isSendable: false,
+          isLocalDraft: true,
+          lastUpdated: d.updatedAt || d.lastUpdated || new Date().toISOString(),
+          header: {
+            type:
+              d.headerType ||
+              (d.header && (d.header.format || d.header.type)) ||
+              "NONE",
+            text:
+              d.headerType === "TEXT"
+                ? d.headerText
+                : (d.header && d.header.text) || undefined,
+            mediaUrl: isMedia
+              ? d.headerMediaUrl || (d.header && d.header.mediaUrl) || undefined
+              : undefined,
+            mediaFilename: d.headerMediaFilename,
+            mediaFilesize: d.headerMediaFilesize,
+            mediaIsLocal:
+              d.headerMediaIsLocal ||
+              (d.headerMediaUrl && d.headerMediaUrl.startsWith("blob:")),
+            mimeType: d.headerMediaMimeType,
+          },
+          body: d.body || "",
+          variables: templateVariables,
+          footer: d.footer || undefined,
+          buttons: Array.isArray(d.buttons)
+            ? d.buttons.map((b: any, bIdx: number) => ({
+                id: b.id || `btn-draft-${bIdx}`,
+                type: b.type,
+                text: b.text || "",
+                url: b.url,
+                phoneNumber: b.phoneNumber || b.phone_number,
+              }))
+            : [],
+        };
+      });
+  } catch (err) {
+    console.warn("Failed to parse local template drafts from localStorage:", err);
+    return [];
+  }
+}
 
 function mapNormalizedToFrontend(t: any): WhatsAppTemplate {
   const isApproved = t.status === "APPROVED";
@@ -49,9 +132,17 @@ export const TemplatesPage: React.FC = () => {
         platformCapabilities?.platformRole === "PLATFORM_MASTER_ADMIN")
   );
 
-  const [templates, setTemplates] = useState<WhatsAppTemplate[]>([]);
+  const [metaTemplates, setMetaTemplates] = useState<WhatsAppTemplate[]>([]);
+  const [localDrafts, setLocalDrafts] = useState<WhatsAppTemplate[]>(() => {
+    try {
+      return parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+    } catch {
+      return [];
+    }
+  });
   const [summary, setSummary] = useState<TemplateSyncSummary | null>(null);
   const [activeTemplate, setActiveTemplate] = useState<WhatsAppTemplate | null>(null);
+  const [editingTemplate, setEditingTemplate] = useState<WhatsAppTemplate | null>(null);
   const [isAuthoring, setIsAuthoring] = useState<boolean>(false);
   const [mobileTab, setMobileTab] = useState<"DETAILS" | "PREVIEW">("DETAILS");
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -62,15 +153,27 @@ export const TemplatesPage: React.FC = () => {
   const fetchTemplates = useCallback(async () => {
     setIsLoading(true);
     setLoadError(null);
+
+    // Refresh local drafts from browser storage
+    try {
+      const drafts = parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      setLocalDrafts(drafts);
+    } catch {
+      // Ignore storage read error
+    }
+
     try {
       const res = await apiClient.listTemplates();
       if (res.data && Array.isArray(res.data.templates)) {
+        res.data.templates.forEach((t: any) => {
+          if (t?.name) addAllowedTestTemplate(t.name);
+        });
         const allowlisted = res.data.templates.filter((t: any) => isAllowedTestTemplate(t.name));
         const mapped = allowlisted.map(mapNormalizedToFrontend);
-        setTemplates(mapped);
+        setMetaTemplates(mapped);
         setSummary(res.data.summary);
       } else {
-        setTemplates([]);
+        setMetaTemplates([]);
       }
     } catch (err: unknown) {
       console.warn("Unable to fetch templates from Meta Cloud API:", err);
@@ -79,7 +182,7 @@ export const TemplatesPage: React.FC = () => {
           ? err.message
           : "Failed to connect to Meta WhatsApp Cloud API. Please ensure Meta credentials are configured."
       );
-      setTemplates([]);
+      setMetaTemplates([]);
     } finally {
       setIsLoading(false);
     }
@@ -95,11 +198,17 @@ export const TemplatesPage: React.FC = () => {
     try {
       const res = await apiClient.syncTemplates();
       if (res.data && Array.isArray(res.data.templates)) {
+        res.data.templates.forEach((t: any) => {
+          if (t?.name) addAllowedTestTemplate(t.name);
+        });
         const allowlisted = res.data.templates.filter((t: any) => isAllowedTestTemplate(t.name));
         const mapped = allowlisted.map(mapNormalizedToFrontend);
-        setTemplates(mapped);
+        setMetaTemplates(mapped);
         setSummary(res.data.summary);
       }
+      // Keep local drafts synchronized
+      const drafts = parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      setLocalDrafts(drafts);
     } catch (err: unknown) {
       console.error("Template synchronization error:", err);
       setLoadError(
@@ -112,10 +221,38 @@ export const TemplatesPage: React.FC = () => {
     }
   };
 
+  const allTemplates = useMemo(() => {
+    // If a template exists on Meta, prefer the real Meta template over an unsubmitted local draft
+    const metaNames = new Set(metaTemplates.map((t) => t.name));
+    const uniqueLocalDrafts = localDrafts.filter((d) => !metaNames.has(d.name));
+    return [...uniqueLocalDrafts, ...metaTemplates];
+  }, [localDrafts, metaTemplates]);
+
   const handleSelectTemplate = (template: WhatsAppTemplate) => {
     setActiveTemplate({ ...template });
     setIsAuthoring(false);
     setMobileTab("DETAILS");
+  };
+
+  const handleEditDraft = (template: WhatsAppTemplate) => {
+    if (!isSuperAdmin) return;
+    setEditingTemplate(template);
+    setActiveTemplate(null);
+    setIsAuthoring(true);
+  };
+
+  const handleDeleteDraft = (draftName: string) => {
+    try {
+      const raw = localStorage.getItem(DRAFTS_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      const updated = list.filter((d: any) => d && d.name !== draftName);
+      localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(updated));
+      setLocalDrafts(parseLocalDrafts(JSON.stringify(updated)));
+    } catch (err) {
+      console.warn("Failed to delete local draft:", err);
+    }
   };
 
   const handleUpdateTemplatePreview = (updated: WhatsAppTemplate) => {
@@ -124,12 +261,30 @@ export const TemplatesPage: React.FC = () => {
 
   const handleCreateNew = () => {
     if (!isSuperAdmin) return;
+    setEditingTemplate(null);
     setActiveTemplate(null);
     setIsAuthoring(true);
   };
 
   const handleBackFromStudio = () => {
     setIsAuthoring(false);
+    setEditingTemplate(null);
+    // Reload local drafts upon returning to Templates page
+    try {
+      const drafts = parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      setLocalDrafts(drafts);
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleDraftSaved = () => {
+    try {
+      const drafts = parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      setLocalDrafts(drafts);
+    } catch {
+      // Ignore
+    }
   };
 
   return (
@@ -137,7 +292,7 @@ export const TemplatesPage: React.FC = () => {
       {!activeTemplate && !isAuthoring ? (
         /* TEMPLATES LIST VIEW */
         <TemplateList
-          templates={templates}
+          templates={allTemplates}
           onSelectTemplate={handleSelectTemplate}
           summary={summary}
           onSync={handleSync}
@@ -147,10 +302,16 @@ export const TemplatesPage: React.FC = () => {
           onRetry={fetchTemplates}
           canCreateTemplate={isSuperAdmin}
           onCreateNew={isSuperAdmin ? handleCreateNew : undefined}
+          onEditDraft={isSuperAdmin ? handleEditDraft : undefined}
+          onDeleteDraft={isSuperAdmin ? handleDeleteDraft : undefined}
         />
       ) : isAuthoring && isSuperAdmin ? (
         /* TEMPLATE STUDIO AUTHORING WORKSPACE */
-        <TemplateStudioAuthoring onBack={handleBackFromStudio} />
+        <TemplateStudioAuthoring
+          onBack={handleBackFromStudio}
+          initialTemplate={editingTemplate}
+          onDraftSaved={handleDraftSaved}
+        />
       ) : activeTemplate ? (
         /* TEMPLATE INSPECTOR & LIVE PREVIEW WORKSPACE */
         <div className="template-workspace">
