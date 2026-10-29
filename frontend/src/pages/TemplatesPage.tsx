@@ -3,11 +3,31 @@ import { Smartphone, ArrowLeft, FileText } from "lucide-react";
 import { WhatsAppTemplate, TemplateSyncSummary } from "../types/template.js";
 import { TemplateList } from "../components/TemplateList.js";
 import { TemplateEditor } from "../components/TemplateEditor.js";
-import { TemplateStudioAuthoring, DRAFTS_STORAGE_KEY } from "../components/TemplateStudioAuthoring.js";
+import {
+  TemplateStudioAuthoring,
+  DRAFTS_STORAGE_KEY,
+  getTemplateDraftsStorageKey,
+  loadTemplateDraftsRaw,
+} from "../components/TemplateStudioAuthoring.js";
 import { WhatsAppPhonePreview } from "../components/WhatsAppPhonePreview.js";
 import { apiClient } from "../services/api.js";
 import { isAllowedTestTemplate, addAllowedTestTemplate } from "../constants/templateAllowlist.js";
 import { useAuth } from "../context/AuthContext.js";
+
+/**
+ * Creates an isolated deep clone of a template, ensuring nested objects
+ * (header, variables, buttons) are never shared mutable references.
+ */
+export function deepCloneTemplate(t: WhatsAppTemplate): WhatsAppTemplate {
+  if (typeof structuredClone === "function") {
+    try {
+      return structuredClone(t);
+    } catch {
+      // fallback
+    }
+  }
+  return JSON.parse(JSON.stringify(t));
+}
 
 export function parseLocalDrafts(raw: string | null): WhatsAppTemplate[] {
   if (!raw) return [];
@@ -125,17 +145,22 @@ function mapNormalizedToFrontend(t: any): WhatsAppTemplate {
 }
 
 export const TemplatesPage: React.FC = () => {
-  const { user, platformCapabilities } = useAuth();
+  const { user, organization, platformCapabilities } = useAuth();
   const isSuperAdmin = Boolean(
     user?.platformRole === "PLATFORM_MASTER_ADMIN" ||
       (platformCapabilities?.isPlatformAdmin &&
         platformCapabilities?.platformRole === "PLATFORM_MASTER_ADMIN")
   );
 
+  const storageKey = useMemo(
+    () => getTemplateDraftsStorageKey(organization?.id),
+    [organization?.id]
+  );
+
   const [metaTemplates, setMetaTemplates] = useState<WhatsAppTemplate[]>([]);
   const [localDrafts, setLocalDrafts] = useState<WhatsAppTemplate[]>(() => {
     try {
-      return parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      return parseLocalDrafts(loadTemplateDraftsRaw(organization?.id));
     } catch {
       return [];
     }
@@ -148,6 +173,8 @@ export const TemplatesPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  // Preview phone number for simulation (persists across template selections, never sent to backend)
+  const [previewPhone, setPreviewPhone] = useState<string>("+91 98765 43210");
 
   // Synchronize templates on page load
   const fetchTemplates = useCallback(async () => {
@@ -156,7 +183,7 @@ export const TemplatesPage: React.FC = () => {
 
     // Refresh local drafts from browser storage
     try {
-      const drafts = parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      const drafts = parseLocalDrafts(loadTemplateDraftsRaw(organization?.id));
       setLocalDrafts(drafts);
     } catch {
       // Ignore storage read error
@@ -207,7 +234,7 @@ export const TemplatesPage: React.FC = () => {
         setSummary(res.data.summary);
       }
       // Keep local drafts synchronized
-      const drafts = parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      const drafts = parseLocalDrafts(loadTemplateDraftsRaw(organization?.id));
       setLocalDrafts(drafts);
     } catch (err: unknown) {
       console.error("Template synchronization error:", err);
@@ -229,7 +256,19 @@ export const TemplatesPage: React.FC = () => {
   }, [localDrafts, metaTemplates]);
 
   const handleSelectTemplate = (template: WhatsAppTemplate) => {
-    setActiveTemplate({ ...template });
+    // Deep clone to guarantee nested properties (header, variables, buttons) are not shared references
+    const cloned = deepCloneTemplate(template);
+
+    // If standard user, initialize preview with "No image selected" so Admin's sample image
+    // is never copied or treated as customer's default campaign creative
+    if (!isSuperAdmin && cloned.header?.type === "IMAGE") {
+      cloned.header.mediaUrl = undefined;
+      cloned.header.mediaFilename = undefined;
+      cloned.header.mediaFilesize = undefined;
+      cloned.header.mediaIsLocal = false;
+    }
+
+    setActiveTemplate(cloned);
     setIsAuthoring(false);
     setMobileTab("DETAILS");
   };
@@ -242,13 +281,20 @@ export const TemplatesPage: React.FC = () => {
   };
 
   const handleDeleteDraft = (draftName: string) => {
+    if (!isSuperAdmin) {
+      console.warn("Unauthorized attempt to delete draft by non-admin user.");
+      return;
+    }
     try {
-      const raw = localStorage.getItem(DRAFTS_STORAGE_KEY);
+      const raw = loadTemplateDraftsRaw(organization?.id);
       if (!raw) return;
       const parsed = JSON.parse(raw);
       const list = Array.isArray(parsed) ? parsed : [parsed];
       const updated = list.filter((d: any) => d && d.name !== draftName);
-      localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(updated));
+      localStorage.setItem(storageKey, JSON.stringify(updated));
+      if (storageKey !== DRAFTS_STORAGE_KEY) {
+        localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(updated));
+      }
       setLocalDrafts(parseLocalDrafts(JSON.stringify(updated)));
     } catch (err) {
       console.warn("Failed to delete local draft:", err);
@@ -257,6 +303,46 @@ export const TemplatesPage: React.FC = () => {
 
   const handleUpdateTemplatePreview = (updated: WhatsAppTemplate) => {
     setActiveTemplate(updated);
+  };
+
+  const handleSaveDraftFromEditor = (updatedTemplate: WhatsAppTemplate) => {
+    // SECURITY GUARD: Standard users must NEVER write to Admin template draft storage
+    if (!isSuperAdmin) {
+      console.warn("Unauthorized attempt to save template draft changes by non-admin user.");
+      return;
+    }
+    try {
+      const raw = loadTemplateDraftsRaw(organization?.id);
+      const list = raw ? JSON.parse(raw) : [];
+      const updatedList = Array.isArray(list) ? list : [list];
+      const idx = updatedList.findIndex(
+        (d: any) => d && (d.id === updatedTemplate.id || d.name === updatedTemplate.name)
+      );
+      if (idx >= 0) {
+        updatedList[idx] = {
+          ...updatedList[idx],
+          body: updatedTemplate.body,
+          headerType: updatedTemplate.header?.type,
+          headerText: updatedTemplate.header?.text,
+          headerMediaUrl: updatedTemplate.header?.mediaUrl,
+          headerMediaFilename: updatedTemplate.header?.mediaFilename,
+          headerMediaFilesize: updatedTemplate.header?.mediaFilesize,
+          variables: updatedTemplate.variables?.reduce((acc: any, v: any) => {
+            acc[v.key] = v.sampleValue || v.fallbackValue;
+            return acc;
+          }, {}),
+          buttons: updatedTemplate.buttons,
+          updatedAt: new Date().toISOString(),
+        };
+        localStorage.setItem(storageKey, JSON.stringify(updatedList));
+        if (storageKey !== DRAFTS_STORAGE_KEY) {
+          localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(updatedList));
+        }
+        setLocalDrafts(parseLocalDrafts(JSON.stringify(updatedList)));
+      }
+    } catch (err) {
+      console.warn("Failed to persist draft update from editor:", err);
+    }
   };
 
   const handleCreateNew = () => {
@@ -271,7 +357,7 @@ export const TemplatesPage: React.FC = () => {
     setEditingTemplate(null);
     // Reload local drafts upon returning to Templates page
     try {
-      const drafts = parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      const drafts = parseLocalDrafts(loadTemplateDraftsRaw(organization?.id));
       setLocalDrafts(drafts);
     } catch {
       // Ignore
@@ -280,7 +366,7 @@ export const TemplatesPage: React.FC = () => {
 
   const handleDraftSaved = () => {
     try {
-      const drafts = parseLocalDrafts(localStorage.getItem(DRAFTS_STORAGE_KEY));
+      const drafts = parseLocalDrafts(loadTemplateDraftsRaw(organization?.id));
       setLocalDrafts(drafts);
     } catch {
       // Ignore
@@ -301,6 +387,7 @@ export const TemplatesPage: React.FC = () => {
           loadError={loadError}
           onRetry={fetchTemplates}
           canCreateTemplate={isSuperAdmin}
+          isSuperAdmin={isSuperAdmin}
           onCreateNew={isSuperAdmin ? handleCreateNew : undefined}
           onEditDraft={isSuperAdmin ? handleEditDraft : undefined}
           onDeleteDraft={isSuperAdmin ? handleDeleteDraft : undefined}
@@ -368,6 +455,9 @@ export const TemplatesPage: React.FC = () => {
                 template={activeTemplate}
                 onChange={handleUpdateTemplatePreview}
                 onCancel={() => setActiveTemplate(null)}
+                onSave={isSuperAdmin ? handleSaveDraftFromEditor : undefined}
+                canSaveDraft={isSuperAdmin}
+                hideAdminSampleImage={!isSuperAdmin}
               />
             </div>
 
@@ -377,7 +467,12 @@ export const TemplatesPage: React.FC = () => {
                 mobileTab === "DETAILS" ? "hide-on-mobile" : ""
               }`}
             >
-              <WhatsAppPhonePreview template={activeTemplate} />
+              <WhatsAppPhonePreview
+                template={activeTemplate}
+                hideSampleMedia={!isSuperAdmin && !activeTemplate.header?.mediaIsLocal && activeTemplate.header?.mediaSource !== "FILE"}
+                previewPhone={previewPhone}
+                onPreviewPhoneChange={setPreviewPhone}
+              />
             </div>
           </div>
         </div>

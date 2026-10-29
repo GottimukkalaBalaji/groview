@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import { ZodError } from "zod";
 import { AppError } from "../utils/errors.js";
 import { sendError } from "../utils/response.js";
 import { logger } from "../utils/logger.js";
@@ -15,6 +16,16 @@ export function errorHandler(
   if (err instanceof AppError) {
     const stack = !isProduction ? err.stack : undefined;
     sendError(res, err.statusCode, err.code, err.message, err.details, stack);
+    return;
+  }
+
+  // Handle uncaught Zod validation errors (defense-in-depth: return 422 instead of raw 500)
+  if (err instanceof ZodError) {
+    const details = err.issues.map((issue) => ({
+      field: issue.path.join("."),
+      message: issue.message,
+    }));
+    sendError(res, 422, "VALIDATION_ERROR", "Validation failed", details);
     return;
   }
 

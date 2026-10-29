@@ -164,10 +164,20 @@ export class BusinessAssignmentService {
   ): Promise<BusinessAssignmentSummary> {
     const prisma = getPrismaClient();
 
-    // 1. Verify organization exists and is not archived
+    // 1. Verify organization exists and is not archived or an internal agency container
     const org = await prisma.organization.findUnique({
       where: { id: input.organizationId },
-      select: { id: true, name: true, isArchived: true, deletedAt: true },
+      select: {
+        id: true,
+        name: true,
+        isArchived: true,
+        deletedAt: true,
+        users: {
+          select: {
+            platformRole: true,
+          },
+        },
+      },
     });
 
     if (!org) {
@@ -177,6 +187,13 @@ export class BusinessAssignmentService {
     if (org.isArchived || org.deletedAt) {
       throw new BadRequestError(
         `Cannot assign archived or suspended organization '${org.name}'.`
+      );
+    }
+
+    // Defense-in-depth: Agency containers directly hosting DELEGATED_ADMIN users cannot be assigned
+    if (org.users && org.users.some((u) => u.platformRole === "DELEGATED_ADMIN")) {
+      throw new BadRequestError(
+        `Cannot assign internal agency container organization '${org.name}'. Agency containers cannot be assigned to delegated administrators.`
       );
     }
 
@@ -438,7 +455,15 @@ export class BusinessAssignmentService {
 
     if (isMasterAdmin) {
       const orgs = await prisma.organization.findMany({
-        where: { isArchived: false, deletedAt: null },
+        where: {
+          isArchived: false,
+          deletedAt: null,
+          users: {
+            none: {
+              platformRole: "DELEGATED_ADMIN",
+            },
+          },
+        },
         select: { id: true, name: true, slug: true },
         orderBy: { name: "asc" },
       });

@@ -17,6 +17,7 @@ export interface WhatsAppMessageBubbleProps {
   showSampleValues?: boolean;
   compact?: boolean;
   overrideTime?: string;
+  hideSampleMedia?: boolean;
 }
 
 export const WhatsAppMessageBubble: React.FC<WhatsAppMessageBubbleProps> = ({
@@ -24,25 +25,29 @@ export const WhatsAppMessageBubble: React.FC<WhatsAppMessageBubbleProps> = ({
   showSampleValues = true,
   compact = false,
   overrideTime,
+  hideSampleMedia = false,
 }) => {
+  const header = template.header || { type: "NONE" };
+  const effectiveMediaUrl = hideSampleMedia ? undefined : header.mediaUrl;
+
   const [imageStatus, setImageStatus] = useState<"idle" | "loading" | "loaded" | "error">(() =>
-    template.header?.mediaUrl ? "loading" : "idle"
+    effectiveMediaUrl ? "loading" : "idle"
   );
 
   // Stale preview prevention: reset image loading status when mediaUrl changes
   useEffect(() => {
-    if (template.header?.mediaUrl) {
+    if (effectiveMediaUrl) {
       setImageStatus("loading");
     } else {
       setImageStatus("idle");
     }
-  }, [template.header?.mediaUrl]);
+  }, [effectiveMediaUrl]);
 
   // Check if header is a GIF
   const isGif = Boolean(
-    template.header?.mimeType === "image/gif" ||
-      template.header?.mediaFilename?.toLowerCase().endsWith(".gif") ||
-      (template.header?.mediaUrl && /\.gif(\?|$)/i.test(template.header.mediaUrl))
+    header.mimeType === "image/gif" ||
+      header.mediaFilename?.toLowerCase().endsWith(".gif") ||
+      (effectiveMediaUrl && /\.gif(\?|$)/i.test(effectiveMediaUrl))
   );
 
   // Substitute variables like {{1}}, {{2}} with sample values
@@ -112,7 +117,6 @@ export const WhatsAppMessageBubble: React.FC<WhatsAppMessageBubbleProps> = ({
     return "9:41 AM";
   }, [overrideTime, template.lastUpdated]);
 
-  const header = template.header || { type: "NONE" };
   const isLocalMediaMissing = Boolean(
     header.mediaIsLocal && (!header.mediaUrl || header.mediaUrl.trim() === "")
   );
@@ -132,9 +136,8 @@ export const WhatsAppMessageBubble: React.FC<WhatsAppMessageBubbleProps> = ({
           <div
             className="wa-bubble-media"
             data-testid="preview-bubble-image-container"
-            style={compact ? { maxHeight: "140px" } : undefined}
           >
-            {header.mediaUrl ? (
+            {effectiveMediaUrl ? (
               <>
                 {imageStatus === "error" ? (
                   <div className="wa-media-error-box" data-testid="preview-image-error">
@@ -150,7 +153,7 @@ export const WhatsAppMessageBubble: React.FC<WhatsAppMessageBubbleProps> = ({
                   </div>
                 ) : (
                   <img
-                    src={header.mediaUrl}
+                    src={effectiveMediaUrl}
                     alt={header.mediaFilename || "Template Header Media"}
                     className="wa-media-img"
                     data-testid="preview-header-image"
@@ -181,7 +184,7 @@ export const WhatsAppMessageBubble: React.FC<WhatsAppMessageBubbleProps> = ({
                 style={{ padding: compact ? "1rem 0.75rem" : "1.5rem 1rem" }}
               >
                 <ImageIcon size={24} className="wa-media-placeholder-icon" />
-                <span>Image Header (No media selected)</span>
+                <span>Image Header — No image selected</span>
               </div>
             )}
 
@@ -343,6 +346,20 @@ export const WhatsAppMessageBubble: React.FC<WhatsAppMessageBubbleProps> = ({
               {btn.type === "PHONE_NUMBER" && <Phone size={13} className="wa-btn-icon" />}
               {(btn.type === "QUICK_REPLY" || !btn.type) && <CornerDownLeft size={13} className="wa-btn-icon" />}
               <span>{btn.text || "Button Action"}</span>
+              {btn.type === "PHONE_NUMBER" && btn.phoneNumber && (
+                <span
+                  className="wa-btn-phone-display"
+                  data-testid={`preview-btn-phone-${btn.id || bIdx}`}
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "rgba(255, 255, 255, 0.7)",
+                    marginLeft: "0.35rem",
+                    fontWeight: 400,
+                  }}
+                >
+                  ({btn.phoneNumber})
+                </span>
+              )}
             </div>
           ))}
         </div>

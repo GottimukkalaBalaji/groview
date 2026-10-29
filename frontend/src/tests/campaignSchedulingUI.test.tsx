@@ -133,6 +133,22 @@ describe("Campaign Scheduling & Recovery UI Tests", () => {
       expect(isValidFutureSchedule("invalid-date-string")).toBe(false);
     });
 
+    it("strictly enforces MIN_SCHEDULE_LEAD_MS (5-minute lead time) at boundaries", () => {
+      const now = Date.now();
+      // Past time: rejected
+      expect(isValidFutureSchedule(new Date(now - 1000).toISOString())).toBe(false);
+      // +1 minute: rejected
+      expect(isValidFutureSchedule(new Date(now + 60 * 1000).toISOString())).toBe(false);
+      // +4 minutes: rejected
+      expect(isValidFutureSchedule(new Date(now + 4 * 60 * 1000).toISOString())).toBe(false);
+      // +4m59s: rejected
+      expect(isValidFutureSchedule(new Date(now + (5 * 60 * 1000 - 1000)).toISOString())).toBe(false);
+      // +5 minutes (with buffer for test execution): accepted
+      expect(isValidFutureSchedule(new Date(now + 5 * 60 * 1000 + 500).toISOString())).toBe(true);
+      // +6 minutes: accepted
+      expect(isValidFutureSchedule(new Date(now + 6 * 60 * 1000).toISOString())).toBe(true);
+    });
+
     it("provides valid default schedule inputs in IST", () => {
       const defaults = getDefaultScheduleInputs();
       expect(defaults.date).toBeDefined();
@@ -340,6 +356,68 @@ describe("Campaign Scheduling & Recovery UI Tests", () => {
       // Click Review & Schedule -> opens confirmation modal with schedule details
       fireEvent.click(launchBtn);
       expect(await screen.findByText("Confirm Scheduled Campaign")).toBeDefined();
+    });
+
+    it("displays 5-minute lead time validation error and disables launch when scheduled time is in the past or under 5 minutes ahead", async () => {
+      const handleSave = vi.fn().mockResolvedValue(undefined);
+      const handleLaunch = vi.fn().mockResolvedValue(undefined);
+      const handleCancel = vi.fn();
+
+      const { container } = render(
+        <CampaignWizard
+          onSave={handleSave}
+          onLaunch={handleLaunch}
+          onCancel={handleCancel}
+          isSaving={false}
+        />
+      );
+
+      // Step 1
+      fireEvent.change(screen.getByPlaceholderText(/Diwali Mega Flash Sale 2026/i), {
+        target: { value: "Lead Time Validation Campaign" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Continue/i }));
+
+      // Step 2
+      await screen.findByText("Step 2: Select Message Template");
+      fireEvent.click(screen.getByRole("button", { name: /Continue/i }));
+
+      // Step 3
+      await screen.findByText("Step 3: Select Target Audience");
+      fireEvent.click(screen.getByRole("button", { name: /Continue/i }));
+
+      // Step 4
+      await screen.findByText("Step 4: Configure Message Variables");
+      fireEvent.click(screen.getByRole("button", { name: /Continue/i }));
+
+      // Step 5: Review Campaign Details
+      await screen.findByText("Step 5: Review Campaign Details");
+
+      // Switch to Schedule for later
+      const scheduleRadio = screen.getByLabelText(/Schedule for later/i);
+      fireEvent.click(scheduleRadio);
+
+      // Set date to a past date
+      const dateInput = screen.getByLabelText(/Schedule Date/i);
+      fireEvent.change(dateInput, { target: { value: "2020-01-01" } });
+
+      // Verify validation message is displayed to the user in input warning, checklist, and launch footer
+      expect(
+        screen.getAllByText("Scheduled time must be at least 5 minutes in the future (Asia/Kolkata timezone).").length
+      ).toBeGreaterThanOrEqual(1);
+
+      // Launch button must be disabled
+      const launchBtn = container.querySelector("#wizard-launch-campaign-btn") as HTMLButtonElement;
+      expect(launchBtn.disabled).toBe(true);
+
+      // Change date to tomorrow -> error clears and launch button becomes enabled
+      const tomorrow = new Date(Date.now() + 86400000).toISOString().split("T")[0];
+      fireEvent.change(dateInput, { target: { value: tomorrow } });
+
+      expect(
+        screen.queryByText("Scheduled time must be at least 5 minutes in the future (Asia/Kolkata timezone).")
+      ).toBeNull();
+      expect(launchBtn.disabled).toBe(false);
     });
   });
 

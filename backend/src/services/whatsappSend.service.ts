@@ -76,6 +76,19 @@ export class WhatsAppSendService {
           errorCode: "CAMPAIGN_STATUS_INVALID",
         };
       }
+
+      // Scheduled campaigns require approval prior to dispatch
+      const isApprovalExempt =
+        !campaign.scheduledAt &&
+        ((campaign as any).approvalStatus === "NOT_REQUIRED" || !(campaign as any).approvalStatus);
+
+      if (!isApprovalExempt && (campaign as any).approvalStatus !== "APPROVED") {
+        return {
+          valid: false,
+          rejectReason: `Cannot dispatch scheduled campaign without administrator approval (status: ${(campaign as any).approvalStatus || "PENDING"})`,
+          errorCode: "CAMPAIGN_NOT_APPROVED",
+        };
+      }
     }
 
     // 3. Validate contact consent and suppression if contactId provided

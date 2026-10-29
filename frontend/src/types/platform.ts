@@ -239,3 +239,24 @@ export interface AssignedOrganizationSummary {
   slug: string;
 }
 
+export interface DelegatedAdminItem {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string | null;
+  platformRole: PlatformRole;
+  organizationId: string;
+  organizationName?: string;
+  organization?: { id: string; name: string; slug?: string };
+  activeAssignmentsCount?: number;
+  assignedOrganizations?: Array<{ id: string; name: string }>;
+  createdAt: string;
+}
+
+export interface CreateDelegatedAdminPayload {
+  firstName: string;
+  lastName?: string;
+  email: string;
+  password: string;
+}
+

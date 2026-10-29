@@ -121,6 +121,18 @@ export const CampaignList: React.FC<CampaignListProps> = ({
                   color: "#fbbf24",
                   border: "1px solid rgba(245, 158, 11, 0.35)",
                 }
+              : statusMeta.label === "Changes Requested"
+              ? {
+                  background: "rgba(244, 63, 94, 0.15)",
+                  color: "#fb7185",
+                  border: "1px solid rgba(244, 63, 94, 0.35)",
+                }
+              : statusMeta.label === "Pending Admin Approval"
+              ? {
+                  background: "rgba(245, 158, 11, 0.15)",
+                  color: "#fbbf24",
+                  border: "1px solid rgba(245, 158, 11, 0.35)",
+                }
               : item.status === "CANCELLED"
               ? {
                   background: "rgba(113, 113, 122, 0.15)",
@@ -130,7 +142,11 @@ export const CampaignList: React.FC<CampaignListProps> = ({
               : undefined
           }
         >
-          {(item.status === "COMPLETED" || item.status === "FAILED") && (
+          {statusMeta.label === "Changes Requested" && <XCircle size={12} />}
+          {statusMeta.label === "Pending Admin Approval" && <Clock size={12} />}
+          {(item.status === "COMPLETED" || item.status === "FAILED") &&
+            statusMeta.label !== "Changes Requested" &&
+            statusMeta.label !== "Pending Admin Approval" && (
             statusMeta.label === "Completed with issues" ? (
               <AlertCircle size={12} />
             ) : statusMeta.label === "Delivery confirmation pending" ? (
@@ -144,7 +160,7 @@ export const CampaignList: React.FC<CampaignListProps> = ({
           {item.status === "SENDING" && <Radio size={12} className="pulsing" />}
           {item.status === "QUEUED" && <Clock size={12} />}
           {item.status === "SCHEDULED" && <Clock size={12} />}
-          {item.status === "DRAFT" && <FileEdit size={12} />}
+          {item.status === "DRAFT" && statusMeta.label !== "Changes Requested" && statusMeta.label !== "Pending Admin Approval" && <FileEdit size={12} />}
           {item.status === "CANCELLED" && <XCircle size={12} />}
           <span>{statusMeta.label}</span>
         </span>
@@ -424,7 +440,7 @@ export const CampaignList: React.FC<CampaignListProps> = ({
                           </button>
                         )}
 
-                        {item.status === "DRAFT" && (
+                        {item.status === "DRAFT" && item.approvalStatus !== "PENDING" && item.approvalStatus !== "REJECTED" && (
                           <button
                             type="button"
                             className="btn-table-action"
@@ -564,7 +580,7 @@ export const CampaignList: React.FC<CampaignListProps> = ({
                     </button>
                   )}
 
-                  {item.status === "DRAFT" && (
+                  {item.status === "DRAFT" && item.approvalStatus !== "PENDING" && item.approvalStatus !== "REJECTED" && (
                     <button
                       type="button"
                       className="btn-mobile-act"

@@ -20,13 +20,16 @@ import {
   Loader2,
   RefreshCw,
   Clock,
+  FileImage,
 } from "lucide-react";
 import { Campaign, CreateCampaignPayload, UpdateCampaignPayload } from "../types/campaign.js";
 import { WhatsAppTemplate } from "../types/template.js";
 import { ContactList } from "../types/contact.js";
+import { PosterCampaignAttachment } from "../types/poster.js";
 import { WhatsAppPhonePreview } from "./WhatsAppPhonePreview.js";
 import { ApiClientError, apiClient } from "../services/api.js";
 import { LaunchConfirmationModal } from "./LaunchConfirmationModal.js";
+import { CampaignPosterPickerModal } from "./poster/CampaignPosterPickerModal.js";
 import { isAllowedTestTemplate, getFriendlyTemplateName } from "../constants/templateAllowlist.js";
 import {
   formatInBusinessTimezone,
@@ -35,6 +38,7 @@ import {
   getDefaultScheduleInputs,
   DEFAULT_BUSINESS_TIMEZONE,
   BUSINESS_TIMEZONE_LABEL,
+  MIN_SCHEDULE_LEAD_MS,
 } from "../utils/timezone.js";
 
 const fallbackEmptyTemplate: WhatsAppTemplate = {
@@ -52,18 +56,24 @@ const fallbackEmptyTemplate: WhatsAppTemplate = {
 
 interface CampaignWizardProps {
   initialCampaign?: Campaign | null;
+  posterAttachment?: PosterCampaignAttachment | null;
+  onRemovePosterAttachment?: () => void;
   onSave: (payload: CreateCampaignPayload | UpdateCampaignPayload, isEdit: boolean) => Promise<void>;
   onCancel: () => void;
   isSaving: boolean;
   onLaunch?: (payload: CreateCampaignPayload | UpdateCampaignPayload, isEdit: boolean) => Promise<void>;
+  userId?: string | null;
 }
 
 export const CampaignWizard: React.FC<CampaignWizardProps> = ({
   initialCampaign,
+  posterAttachment,
+  onRemovePosterAttachment,
   onSave,
   onCancel,
   isSaving,
   onLaunch,
+  userId,
 }) => {
   const isEdit = Boolean(initialCampaign);
 
@@ -92,6 +102,20 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
   const [isSyncingTemplates, setIsSyncingTemplates] = useState<boolean>(false);
   const [isValidatingParams, setIsValidatingParams] = useState<boolean>(false);
 
+  // Media & Poster Attachment State
+  const [attachedMedia, setAttachedMedia] = useState<PosterCampaignAttachment | null>(
+    posterAttachment || null
+  );
+  const [isPosterPickerOpen, setIsPosterPickerOpen] = useState<boolean>(false);
+  const [mediaDetachedNotice, setMediaDetachedNotice] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (posterAttachment !== undefined) {
+      setAttachedMedia(posterAttachment);
+    }
+  }, [posterAttachment]);
+
   // Stable clientRequestId generated once per logical create draft session
   const clientRequestIdRef = useRef<string>(
     typeof crypto !== "undefined" && crypto.randomUUID
@@ -100,7 +124,9 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
   );
 
   // Step 1: Basics
-  const [name, setName] = useState<string>(initialCampaign?.name || "");
+  const [name, setName] = useState<string>(
+    initialCampaign?.name || (posterAttachment ? `Campaign - ${posterAttachment.title}` : "")
+  );
   const [description, setDescription] = useState<string>(initialCampaign?.description || "");
 
   // Step 2: Template
@@ -158,11 +184,11 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
     }
     try {
       const utcString = parseScheduleToUTC(scheduleDate, scheduleTime);
-      const isFuture = isValidFutureSchedule(utcString);
+      const isFuture = isValidFutureSchedule(utcString, MIN_SCHEDULE_LEAD_MS);
       if (!isFuture) {
         return {
           scheduledAtUtc: utcString,
-          scheduleValidationError: "Scheduled time must be in the future (Asia/Kolkata timezone).",
+          scheduleValidationError: "Scheduled time must be at least 5 minutes in the future (Asia/Kolkata timezone).",
         };
       }
       return { scheduledAtUtc: utcString, scheduleValidationError: null };
@@ -182,7 +208,7 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
       try {
         const res = await apiClient.listAudiences();
         if (isMounted) {
-          const lists = res.data || [];
+          const lists = res?.data || [];
           setRealAudiences(lists);
           if (lists.length > 0 && !initialCampaign?.audienceId) {
             setSelectedAudienceId(lists[0].id);
@@ -199,9 +225,10 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
     const fetchTemplates = async () => {
       try {
         const res = await apiClient.listTemplates(false, false);
-        if (isMounted && res.data?.templates) {
+        const rawTemplates = Array.isArray(res?.data) ? res?.data : (res?.data?.templates || []);
+        if (isMounted && rawTemplates.length > 0) {
           // Strictly filter for ALLOWED testing templates only
-          const allowlistedTemplates = res.data.templates.filter(
+          const allowlistedTemplates = rawTemplates.filter(
             (t: any) => isAllowedTestTemplate(t.name)
           );
 
@@ -284,8 +311,9 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
     setFormError(null);
     try {
       const res = await apiClient.syncTemplates();
-      if (res.data?.templates) {
-        const allowlistedTemplates = res.data.templates.filter(
+      const rawSync = Array.isArray(res.data) ? res.data : (res.data?.templates || []);
+      if (rawSync.length > 0) {
+        const allowlistedTemplates = rawSync.filter(
           (t: any) => isAllowedTestTemplate(t.name)
         );
 
@@ -386,7 +414,7 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
     return defaults;
   });
 
-  // Whenever template changes, re-sync variable defaults
+  // Whenever template changes, re-sync variable defaults and detach incompatible media
   const handleSelectTemplate = (template: WhatsAppTemplate) => {
     setSelectedTemplateId(template.id);
     const updatedVars: Record<string, string> = {};
@@ -394,6 +422,18 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
       updatedVars[v.key] = v.sampleValue || v.fallbackValue || "";
     });
     setVariablesMapping(updatedVars);
+
+    // If switching to a template that does not support image headers, detach any attached media
+    const isImageSupported = template.header?.type === "IMAGE";
+    if (!isImageSupported && attachedMedia) {
+      setAttachedMedia(null);
+      onRemovePosterAttachment?.();
+      setMediaDetachedNotice(
+        `Poster attachment was detached because the selected template "${template.name}" does not support an image header (Header type: ${template.header?.type || "NONE"}).`
+      );
+    } else {
+      setMediaDetachedNotice(null);
+    }
   };
 
   // Variable input change handler
@@ -404,9 +444,24 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
     }));
   };
 
+  const isImageHeaderSupported = selectedTemplate.header?.type === "IMAGE";
+
   // Construct active template for real-time WhatsApp phone preview
   const livePreviewTemplate: WhatsAppTemplate = {
     ...selectedTemplate,
+    header: isImageHeaderSupported
+      ? attachedMedia
+        ? {
+            type: "IMAGE",
+            mediaUrl: attachedMedia.dataUrl,
+            mediaFilename: attachedMedia.title,
+          }
+        : {
+            type: "IMAGE",
+            mediaUrl: undefined,
+            mediaFilename: undefined,
+          }
+      : selectedTemplate.header,
     variables: selectedTemplate.variables.map((v) => ({
       ...v,
       sampleValue: variablesMapping[v.key] ?? v.sampleValue ?? v.fallbackValue,
@@ -857,6 +912,275 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
       <div className="wizard-two-col-layout">
         {/* Left Column: Interactive Step Form */}
         <div className={`wizard-form-col ${mobileTab === "PREVIEW" ? "hide-on-mobile" : ""}`}>
+          {/* Campaign Media (WhatsApp Header) Section */}
+          <div className="campaign-media-section" data-testid="campaign-media-section" style={{ marginBottom: "1.25rem" }}>
+            {/* If template was switched and media detached, show notice */}
+            {mediaDetachedNotice && (
+              <div
+                className="wizard-error-banner"
+                role="alert"
+                style={{
+                  margin: "0 0 0.75rem 0",
+                  background: "rgba(245, 158, 11, 0.1)",
+                  border: "1px solid rgba(245, 158, 11, 0.3)",
+                  color: "var(--accent-amber)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  padding: "0.6rem 0.85rem",
+                  borderRadius: "6px",
+                  fontSize: "0.82rem",
+                }}
+              >
+                <AlertCircle size={16} style={{ flexShrink: 0 }} />
+                <span>{mediaDetachedNotice}</span>
+              </div>
+            )}
+
+            {!isImageHeaderSupported ? (
+              <div
+                className="campaign-media-disabled-banner"
+                data-testid="campaign-media-disabled-banner"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.65rem",
+                  padding: "0.85rem 1rem",
+                  borderRadius: "8px",
+                  background: "rgba(255, 255, 255, 0.03)",
+                  border: "1px solid var(--border-subtle)",
+                  color: "var(--text-secondary)",
+                  fontSize: "0.82rem",
+                  lineHeight: 1.4,
+                }}
+              >
+                <Info size={16} style={{ color: "var(--accent-indigo-light)", flexShrink: 0 }} />
+                <span>
+                  The selected template <strong>"{selectedTemplate.name}"</strong> does not support image headers (Header type: {selectedTemplate.header?.type || "NONE"}). Posters and image uploads are only available for templates with an IMAGE header.
+                </span>
+              </div>
+            ) : (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/jpg,image/webp"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    e.target.value = "";
+
+                    if (!file.type.startsWith("image/")) {
+                      setFormError("Please select a valid image file (PNG, JPEG, or WebP).");
+                      return;
+                    }
+
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                      const dataUrl = event.target?.result as string;
+                      if (!dataUrl) return;
+
+                      const img = new Image();
+                      img.onload = () => {
+                        const width = img.naturalWidth || 1080;
+                        const height = img.naturalHeight || 1080;
+
+                        const newAttachment: PosterCampaignAttachment = {
+                          blob: file,
+                          dataUrl,
+                          title: file.name.replace(/\.[^/.]+$/, ""),
+                          width,
+                          height,
+                          presetId: "",
+                          format: file.type.includes("jpeg") || file.type.includes("jpg") ? "jpeg" : "png",
+                          filename: file.name,
+                          createdAt: Date.now(),
+                        };
+
+                        setAttachedMedia(newAttachment);
+                        setFormError(null);
+                        setMediaDetachedNotice(null);
+                      };
+                      img.src = dataUrl;
+                    };
+                    reader.readAsDataURL(file);
+                  }}
+                  aria-label="Upload Image File"
+                  data-testid="campaign-image-file-input"
+                />
+
+                {attachedMedia ? (
+                  <div
+                    className="campaign-attached-poster-banner"
+                    data-testid="attached-media-card"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "1rem",
+                      padding: "0.85rem 1rem",
+                      borderRadius: "8px",
+                      background: "rgba(16, 185, 129, 0.08)",
+                      border: "1px solid rgba(16, 185, 129, 0.3)",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", minWidth: 0, flex: 1 }}>
+                      <img
+                        src={attachedMedia.dataUrl}
+                        alt={attachedMedia.title}
+                        style={{
+                          width: "48px",
+                          height: "48px",
+                          objectFit: "cover",
+                          borderRadius: "6px",
+                          border: "1px solid rgba(255, 255, 255, 0.1)",
+                          flexShrink: 0,
+                        }}
+                      />
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                          <strong style={{ fontSize: "0.88rem", color: "var(--text-primary)" }}>
+                            {attachedMedia.title}
+                          </strong>
+                          <span
+                            style={{
+                              fontSize: "0.7rem",
+                              padding: "0.1rem 0.4rem",
+                              borderRadius: "4px",
+                              background: "rgba(16, 185, 129, 0.15)",
+                              color: "var(--accent-emerald-light)",
+                            }}
+                          >
+                            {attachedMedia.width} × {attachedMedia.height} px ({attachedMedia.format.toUpperCase()})
+                          </span>
+                          <span
+                            style={{
+                              fontSize: "0.7rem",
+                              padding: "0.1rem 0.4rem",
+                              borderRadius: "4px",
+                              background: "rgba(255, 255, 255, 0.08)",
+                              color: "var(--text-secondary)",
+                            }}
+                          >
+                            {attachedMedia.presetId ? "Poster Studio" : "Uploaded Image"}
+                          </span>
+                          {Math.abs(attachedMedia.width / attachedMedia.height - 1.91) > 0.1 && (
+                            <span
+                              style={{
+                                fontSize: "0.7rem",
+                                padding: "0.1rem 0.4rem",
+                                borderRadius: "4px",
+                                background: "rgba(99, 102, 241, 0.15)",
+                                color: "var(--accent-indigo-light)",
+                              }}
+                              title="Full composition preserved without cropping via contain mode"
+                            >
+                              Preserved in Contain Mode
+                            </span>
+                          )}
+                        </div>
+                        <p style={{ margin: "0.15rem 0 0 0", fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                          Attached for campaign preview in browser memory. (Note: WhatsApp Cloud API live send requires future media integration).
+                        </p>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        style={{ fontSize: "0.75rem", padding: "0.35rem 0.65rem" }}
+                        onClick={() => setIsPosterPickerOpen(true)}
+                        aria-label="Replace Poster"
+                      >
+                        Replace
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        style={{ fontSize: "0.75rem", padding: "0.35rem 0.65rem" }}
+                        onClick={() => {
+                          setAttachedMedia(null);
+                          onRemovePosterAttachment?.();
+                        }}
+                        aria-label="Remove media"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    className="campaign-media-picker-card"
+                    data-testid="campaign-media-picker-card"
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "0.6rem",
+                      padding: "0.9rem 1rem",
+                      borderRadius: "8px",
+                      background: "var(--bg-glass-card)",
+                      border: "1px dashed var(--border-subtle)",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "0.5rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                        <FileImage size={18} color="var(--accent-emerald)" />
+                        <span style={{ fontSize: "0.88rem", fontWeight: 600, color: "var(--text-primary)" }}>
+                          Campaign Media (WhatsApp Header)
+                        </span>
+                        <span style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                          (No image selected)
+                        </span>
+                      </div>
+
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ fontSize: "0.78rem", padding: "0.35rem 0.75rem", display: "flex", alignItems: "center", gap: "0.4rem" }}
+                          onClick={() => fileInputRef.current?.click()}
+                          aria-label="Upload Image"
+                        >
+                          <FileImage size={13} />
+                          <span>Upload Image</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ fontSize: "0.78rem", padding: "0.35rem 0.75rem", display: "flex", alignItems: "center", gap: "0.4rem" }}
+                          onClick={() => setIsPosterPickerOpen(true)}
+                          aria-label="Posters"
+                        >
+                          <Sparkles size={13} color="var(--accent-emerald)" />
+                          <span>Posters</span>
+                        </button>
+                      </div>
+                    </div>
+                    <p style={{ margin: 0, fontSize: "0.78rem", color: "var(--text-secondary)", lineHeight: 1.4 }}>
+                      This template header requires an image. Attach a 1200×628 WhatsApp header design (or 1080×1080 poster) from Poster Studio or upload a local image to preview in your campaign's WhatsApp message header.
+                    </p>
+                  </div>
+                )}
+
+                {/* User-Isolated Saved Posters Picker Modal */}
+                <CampaignPosterPickerModal
+                  isOpen={isPosterPickerOpen}
+                  onClose={() => setIsPosterPickerOpen(false)}
+                  onSelectPoster={(poster) => {
+                    setAttachedMedia(poster);
+                    setIsPosterPickerOpen(false);
+                    setFormError(null);
+                    setMediaDetachedNotice(null);
+                  }}
+                  userId={userId}
+                />
+              </>
+            )}
+          </div>
+
           {/* STEP 1: CAMPAIGN BASICS */}
           {currentStep === 1 && (
             <div className="wizard-step-card">
@@ -1423,6 +1747,12 @@ export const CampaignWizard: React.FC<CampaignWizardProps> = ({
                     ) : (
                       "0 Contacts"
                     )}
+                  </span>
+                </div>
+                <div className="review-summary-item">
+                  <span className="review-k">Header Media</span>
+                  <span className="review-v">
+                    {attachedMedia ? `${attachedMedia.title} (${attachedMedia.width}×${attachedMedia.height} px)` : "None (Text Header)"}
                   </span>
                 </div>
                 <div className="review-summary-item">

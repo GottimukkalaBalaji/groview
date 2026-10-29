@@ -43,6 +43,13 @@ enum AudienceType {
   SEGMENT
 }
 
+enum CampaignApprovalStatus {
+  NOT_REQUIRED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 // Initial tenant boundary model (Organization)
 model Organization {
   id           String              @id @default(cuid())
@@ -110,6 +117,16 @@ model Campaign {
   // Creator identifier (honestly tracked without pretending authentication exists)
   createdBy        String?        @default("system_user")
 
+  // Approval workflow audit fields
+  approvalStatus   CampaignApprovalStatus @default(NOT_REQUIRED)
+  approvedAt       DateTime?
+  approvedBy       String?
+  approvalNotes    String?
+  rejectedAt       DateTime?
+  rejectedBy       String?
+  rejectionReason  String?
+  dispatchRun      Int                    @default(1)
+
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
@@ -118,6 +135,7 @@ model Campaign {
   @@unique([organizationId, clientRequestId])
   @@unique([organizationId, id])
   @@index([organizationId, status])
+  @@index([organizationId, approvalStatus])
   @@index([organizationId, createdAt])
   @@map("campaigns")
 }

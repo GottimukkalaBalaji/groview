@@ -10,6 +10,7 @@ import {
   PlatformTemplateResponse,
   BusinessAssignmentSummary,
   EligibleDelegatedAdmin,
+  DelegatedAdminItem,
 } from "../types/platform.js";
 import {
   ShieldCheck,
@@ -42,7 +43,7 @@ import {
   PlusCircle,
 } from "lucide-react";
 
-type MasterAdminTab = "overview" | "organizations" | "assignments" | "whatsapp";
+type MasterAdminTab = "overview" | "organizations" | "assignments" | "whatsapp" | "admins";
 
 export const MasterAdminPage: React.FC = () => {
   const { user, organization, platformCapabilities } = useAuth();
@@ -147,6 +148,28 @@ export const MasterAdminPage: React.FC = () => {
     type: "success" | "error" | "info";
     message: string;
   } | null>(null);
+
+  // Step 5: Delegated Admins Management State
+  const [admins, setAdmins] = useState<DelegatedAdminItem[]>([]);
+  const [loadingAdmins, setLoadingAdmins] = useState(false);
+  const [adminsError, setAdminsError] = useState<string | null>(null);
+  const [adminsSearch, setAdminsSearch] = useState("");
+  const [adminFeedback, setAdminFeedback] = useState<{
+    type: "success" | "error" | "info";
+    message: string;
+  } | null>(null);
+
+  // Create Admin Modal State
+  const [isCreateAdminModalOpen, setIsCreateAdminModalOpen] = useState(false);
+  const [createAdminFirstName, setCreateAdminFirstName] = useState("");
+  const [createAdminLastName, setCreateAdminLastName] = useState("");
+  const [createAdminEmail, setCreateAdminEmail] = useState("");
+  const [createAdminPassword, setCreateAdminPassword] = useState("");
+  const [createAdminConfirmPassword, setCreateAdminConfirmPassword] = useState("");
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
+  const [showAdminConfirmPassword, setShowAdminConfirmPassword] = useState(false);
+  const [isSubmittingCreateAdmin, setIsSubmittingCreateAdmin] = useState(false);
+  const [createAdminModalError, setCreateAdminModalError] = useState<string | null>(null);
 
 
   // Copy helper with safe fallback and explicit feedback
@@ -658,8 +681,20 @@ export const MasterAdminPage: React.FC = () => {
         setAssignModalError("Failed to create assignment");
       }
     } catch (err: unknown) {
-      const msg = err instanceof ApiClientError ? err.message : (err as Error).message;
-      setAssignModalError(sanitizeErrorMessage(msg));
+      if (err instanceof ApiClientError) {
+        if (err.details && Array.isArray(err.details) && err.details.length > 0) {
+          const detailMsgs = err.details
+            .map((d: any) => d.message || d.field)
+            .filter(Boolean)
+            .join(". ");
+          setAssignModalError(detailMsgs || err.message);
+        } else {
+          setAssignModalError(sanitizeErrorMessage(err.message));
+        }
+      } else {
+        const msg = (err as Error)?.message || "Failed to create assignment";
+        setAssignModalError(sanitizeErrorMessage(msg));
+      }
     } finally {
       setIsSubmittingAssign(false);
     }
@@ -705,6 +740,124 @@ export const MasterAdminPage: React.FC = () => {
     }
   };
 
+  // Step 5: Delegated Admins Loader & Modal Handlers
+  const loadAdmins = useCallback(async () => {
+    if (!isPlatformAuthorized) return;
+    setLoadingAdmins(true);
+    setAdminsError(null);
+    try {
+      const res = await apiClient.getDelegatedAdmins();
+      if (res?.success && res.data) {
+        setAdmins(res.data);
+      } else {
+        setAdmins([]);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof ApiClientError
+        ? err.message
+        : (err as Error)?.message || "Failed to load delegated administrators.";
+      setAdminsError(sanitizeErrorMessage(msg));
+    } finally {
+      setLoadingAdmins(false);
+    }
+  }, [isPlatformAuthorized]);
+
+  const openCreateAdminModal = () => {
+    setCreateAdminFirstName("");
+    setCreateAdminLastName("");
+    setCreateAdminEmail("");
+    setCreateAdminPassword("");
+    setCreateAdminConfirmPassword("");
+    setShowAdminPassword(false);
+    setShowAdminConfirmPassword(false);
+    setCreateAdminModalError(null);
+    setIsCreateAdminModalOpen(true);
+  };
+
+  const closeCreateAdminModal = () => {
+    if (isSubmittingCreateAdmin) return;
+    setIsCreateAdminModalOpen(false);
+    setCreateAdminModalError(null);
+  };
+
+  const handleCreateAdminSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreateAdminModalError(null);
+
+    const cleanFirst = createAdminFirstName.trim();
+    const cleanLast = createAdminLastName.trim();
+    const cleanEmail = createAdminEmail.trim().toLowerCase();
+
+    if (!cleanFirst) {
+      setCreateAdminModalError("First name is required.");
+      return;
+    }
+    if (!cleanEmail) {
+      setCreateAdminModalError("Email is required.");
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(cleanEmail)) {
+      setCreateAdminModalError("Please provide a valid email address.");
+      return;
+    }
+    if (!createAdminPassword) {
+      setCreateAdminModalError("Password is required.");
+      return;
+    }
+    if (createAdminPassword.length < 8) {
+      setCreateAdminModalError("Password must be at least 8 characters long.");
+      return;
+    }
+    if (createAdminPassword.length > 128) {
+      setCreateAdminModalError("Password cannot exceed 128 characters.");
+      return;
+    }
+    if (!/[A-Z]/.test(createAdminPassword)) {
+      setCreateAdminModalError("Password must contain at least one uppercase letter.");
+      return;
+    }
+    if (!/[a-z]/.test(createAdminPassword)) {
+      setCreateAdminModalError("Password must contain at least one lowercase letter.");
+      return;
+    }
+    if (!/[0-9]/.test(createAdminPassword)) {
+      setCreateAdminModalError("Password must contain at least one numeric digit.");
+      return;
+    }
+    if (createAdminPassword !== createAdminConfirmPassword) {
+      setCreateAdminModalError("Passwords do not match.");
+      return;
+    }
+
+    setIsSubmittingCreateAdmin(true);
+    try {
+      const res = await apiClient.createDelegatedAdmin({
+        firstName: cleanFirst,
+        lastName: cleanLast || undefined,
+        email: cleanEmail,
+        password: createAdminPassword,
+      });
+
+      if (res?.success) {
+        setAdminFeedback({
+          type: "success",
+          message: `Delegated administrator account created successfully for ${cleanEmail}.`,
+        });
+        setIsCreateAdminModalOpen(false);
+        loadAdmins();
+        loadDelegatedAdmins();
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof ApiClientError
+        ? err.message
+        : (err as Error)?.message || "Failed to create delegated administrator.";
+      setCreateAdminModalError(sanitizeErrorMessage(msg));
+    } finally {
+      setIsSubmittingCreateAdmin(false);
+    }
+  };
+
   // Prefetch platform overview on mount so telemetry and badges are warm
   useEffect(() => {
     if (isPlatformAuthorized && !overview) {
@@ -731,6 +884,8 @@ export const MasterAdminPage: React.FC = () => {
     } else if (activeTab === "whatsapp") {
       loadWhatsAppStatus();
       loadTemplates(false);
+    } else if (activeTab === "admins") {
+      loadAdmins();
     }
   }, [
     activeTab,
@@ -741,6 +896,7 @@ export const MasterAdminPage: React.FC = () => {
     loadTemplates,
     loadAssignments,
     loadDelegatedAdmins,
+    loadAdmins,
     orgSearch,
     orgStatusFilter,
     assignmentsSearch,
@@ -786,6 +942,11 @@ export const MasterAdminPage: React.FC = () => {
             setIsAssignModalOpen(false);
             setAssignModalError(null);
           }
+        } else if (isCreateAdminModalOpen) {
+          if (!isSubmittingCreateAdmin) {
+            setIsCreateAdminModalOpen(false);
+            setCreateAdminModalError(null);
+          }
         } else if (confirmRevokeAssignment) {
           if (!isSubmittingRevoke) {
             setConfirmRevokeAssignment(null);
@@ -806,6 +967,7 @@ export const MasterAdminPage: React.FC = () => {
       isDisconnectModalOpen ||
       isConnectModalOpen ||
       isAssignModalOpen ||
+      isCreateAdminModalOpen ||
       confirmRevokeAssignment ||
       confirmActionOrg ||
       selectedOrgId
@@ -822,6 +984,8 @@ export const MasterAdminPage: React.FC = () => {
     isSubmittingConnect,
     isAssignModalOpen,
     isSubmittingAssign,
+    isCreateAdminModalOpen,
+    isSubmittingCreateAdmin,
     confirmRevokeAssignment,
     isSubmittingRevoke,
     confirmActionOrg,
@@ -1003,6 +1167,26 @@ export const MasterAdminPage: React.FC = () => {
           <Settings size={16} />
           Shared WhatsApp Platform
         </button>
+        <button
+          className={`master-admin-tab-btn ${activeTab === "admins" ? "active" : ""}`}
+          onClick={() => setActiveTab("admins")}
+        >
+          <ShieldCheck size={16} />
+          Admins
+          {admins.length > 0 && (
+            <span
+              style={{
+                marginLeft: "4px",
+                padding: "2px 6px",
+                borderRadius: "10px",
+                fontSize: "0.72rem",
+                backgroundColor: "rgba(255, 255, 255, 0.1)",
+              }}
+            >
+              {admins.length}
+            </span>
+          )}
+        </button>
       </nav>
 
       {/* TAB 1: OVERVIEW */}
@@ -1041,7 +1225,7 @@ export const MasterAdminPage: React.FC = () => {
                 color: "#f87171",
               }}
             >
-              <AlertTriangle size={20} style={{ marginBottom: "0.5rem" }} />
+              <AlertTriangle size={20} aria-hidden="true" focusable={false} style={{ marginBottom: "0.5rem" }} />
               <p style={{ margin: 0 }}>{overviewError}</p>
             </div>
           )}
@@ -1591,7 +1775,7 @@ export const MasterAdminPage: React.FC = () => {
               }}
             >
               <div style={{ display: "flex", alignItems: "flex-start", gap: "0.75rem" }}>
-                <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: "2px" }} />
+                <AlertTriangle size={18} aria-hidden="true" focusable={false} style={{ flexShrink: 0, marginTop: "2px" }} />
                 <div>
                   <strong style={{ display: "block", color: "#fef3c7", marginBottom: "4px" }}>
                     Database Migration Pending
@@ -2356,6 +2540,365 @@ export const MasterAdminPage: React.FC = () => {
         </section>
       )}
 
+      {/* TAB 5: ADMINS (DELEGATED ADMINS MANAGEMENT) */}
+      {activeTab === "admins" && (
+        <section aria-labelledby="admins-heading">
+          {/* Header & Primary Actions */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1.25rem", flexWrap: "wrap", gap: "0.75rem" }}>
+            <div>
+              <h2 id="admins-heading" style={{ fontSize: "1.1rem", fontWeight: 600, color: "var(--text-primary)", margin: 0 }}>
+                Delegated Platform Administrators
+              </h2>
+              <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
+                Create and manage agency delegated administrators with scoped tenant access
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={openCreateAdminModal}
+                className="btn btn-primary"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  padding: "0.4rem 0.85rem",
+                  fontSize: "0.82rem",
+                  backgroundColor: "var(--accent-emerald)",
+                  color: "#ffffff",
+                }}
+              >
+                <PlusCircle size={14} />
+                Create Delegated Admin
+              </button>
+              <button
+                type="button"
+                onClick={loadAdmins}
+                disabled={loadingAdmins}
+                className="btn btn-secondary"
+                style={{ display: "inline-flex", alignItems: "center", gap: "0.5rem", padding: "0.4rem 0.85rem", fontSize: "0.82rem" }}
+              >
+                <RefreshCw size={14} className={loadingAdmins ? "animate-spin" : ""} />
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          {/* Feedback Banner (Success / Error / Info) */}
+          {adminFeedback && (
+            <div
+              role="alert"
+              className="glass-panel"
+              style={{
+                padding: "0.85rem 1.25rem",
+                marginBottom: "1rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                border: adminFeedback.type === "success"
+                  ? "1px solid rgba(16, 185, 129, 0.4)"
+                  : adminFeedback.type === "error"
+                  ? "1px solid rgba(239, 68, 68, 0.4)"
+                  : "1px solid rgba(59, 130, 246, 0.4)",
+                backgroundColor: adminFeedback.type === "success"
+                  ? "rgba(16, 185, 129, 0.1)"
+                  : adminFeedback.type === "error"
+                  ? "rgba(239, 68, 68, 0.1)"
+                  : "rgba(59, 130, 246, 0.1)",
+                color: adminFeedback.type === "success"
+                  ? "var(--accent-emerald)"
+                  : adminFeedback.type === "error"
+                  ? "#f87171"
+                  : "#60a5fa",
+                fontSize: "0.875rem",
+                borderRadius: "8px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                {adminFeedback.type === "success" ? (
+                  <CheckCircle2 size={16} />
+                ) : adminFeedback.type === "error" ? (
+                  <AlertCircle size={16} />
+                ) : (
+                  <Info size={16} />
+                )}
+                <span>{adminFeedback.message}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAdminFeedback(null)}
+                style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: "2px" }}
+                aria-label="Dismiss feedback"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
+          {/* Filter Bar: Search & Admin Count */}
+          <div
+            className="glass-panel"
+            style={{
+              padding: "1rem 1.25rem",
+              marginBottom: "1.25rem",
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "1rem",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
+            <div style={{ position: "relative", flex: 1, minWidth: "220px", maxWidth: "420px" }}>
+              <Search
+                size={16}
+                style={{ position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }}
+              />
+              <input
+                type="text"
+                placeholder="Search by name, email, or agency organization..."
+                value={adminsSearch}
+                onChange={(e) => setAdminsSearch(e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: adminsSearch.length > 0 ? "0.5rem 2.25rem 0.5rem 2.25rem" : "0.5rem 0.75rem 0.5rem 2.25rem",
+                  borderRadius: "6px",
+                  border: "1px solid var(--border-subtle)",
+                  backgroundColor: "rgba(15, 23, 42, 0.6)",
+                  color: "var(--text-primary)",
+                  fontSize: "0.875rem",
+                  boxSizing: "border-box",
+                }}
+              />
+              {adminsSearch && (
+                <button
+                  onClick={() => setAdminsSearch("")}
+                  style={{
+                    position: "absolute",
+                    right: "10px",
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "none",
+                    border: "none",
+                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                    padding: "2px",
+                  }}
+                  aria-label="Clear search"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+
+            <div style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
+              Total: <strong style={{ color: "var(--text-primary)" }}>{admins.length}</strong> delegated admins
+            </div>
+          </div>
+
+          {/* Error Message */}
+          {adminsError && (
+            <div
+              role="alert"
+              className="glass-panel"
+              style={{
+                padding: "1rem",
+                marginBottom: "1rem",
+                border: "1px solid rgba(239, 68, 68, 0.3)",
+                color: "#f87171",
+                fontSize: "0.875rem",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <span>{adminsError}</span>
+              <button
+                type="button"
+                onClick={() => setAdminsError(null)}
+                style={{ background: "none", border: "none", color: "#f87171", cursor: "pointer" }}
+                aria-label="Dismiss error"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
+
+          {/* Admins Table or Loading / Empty States */}
+          {loadingAdmins ? (
+            <div className="glass-panel" style={{ padding: "3rem 1rem", textAlign: "center", color: "var(--text-muted)" }}>
+              <RefreshCw size={24} className="animate-spin" style={{ margin: "0 auto 0.75rem auto", display: "block" }} />
+              <p style={{ margin: 0, fontSize: "0.875rem" }}>Loading delegated administrators...</p>
+            </div>
+          ) : admins.length === 0 ? (
+            <div className="glass-panel" style={{ padding: "3rem 1.5rem", textAlign: "center" }}>
+              <ShieldCheck size={36} style={{ color: "var(--text-muted)", margin: "0 auto 1rem auto", display: "block" }} />
+              <h3 style={{ fontSize: "1.05rem", fontWeight: 600, color: "var(--text-primary)", margin: "0 0 0.5rem 0" }}>
+                No delegated administrators configured
+              </h3>
+              <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", margin: "0 0 1.25rem 0", maxWidth: "480px", marginInline: "auto" }}>
+                Create delegated administrator accounts to enable external agency managers to operate assigned customer businesses without granting global platform permissions.
+              </p>
+              <button
+                type="button"
+                onClick={openCreateAdminModal}
+                className="btn btn-primary"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  padding: "0.45rem 1rem",
+                  fontSize: "0.82rem",
+                  backgroundColor: "var(--accent-emerald)",
+                  color: "#ffffff",
+                }}
+              >
+                <PlusCircle size={14} />
+                Create First Admin
+              </button>
+            </div>
+          ) : (
+            <div className="glass-panel" style={{ overflow: "hidden", marginBottom: "1.25rem" }}>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: "0.85rem" }}>
+                  <thead>
+                    <tr style={{ borderBottom: "1px solid var(--border-subtle)", backgroundColor: "rgba(255, 255, 255, 0.02)" }}>
+                      <th style={{ padding: "0.75rem 1rem", color: "var(--text-muted)", fontWeight: 600 }}>Administrator</th>
+                      <th style={{ padding: "0.75rem 1rem", color: "var(--text-muted)", fontWeight: 600 }}>Agency Container</th>
+                      <th style={{ padding: "0.75rem 1rem", color: "var(--text-muted)", fontWeight: 600 }}>Platform Role</th>
+                      <th style={{ padding: "0.75rem 1rem", color: "var(--text-muted)", fontWeight: 600 }}>Active Assignments</th>
+                      <th style={{ padding: "0.75rem 1rem", color: "var(--text-muted)", fontWeight: 600 }}>Created Date</th>
+                      <th style={{ padding: "0.75rem 1rem", color: "var(--text-muted)", fontWeight: 600, textAlign: "right" }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {admins
+                      .filter((admin) => {
+                        if (!adminsSearch.trim()) return true;
+                        const term = adminsSearch.toLowerCase();
+                        return (
+                          admin.email.toLowerCase().includes(term) ||
+                          admin.firstName.toLowerCase().includes(term) ||
+                          Boolean(admin.lastName?.toLowerCase().includes(term)) ||
+                          Boolean(admin.organizationName?.toLowerCase().includes(term))
+                        );
+                      })
+                      .map((admin) => (
+                        <tr
+                          key={admin.id}
+                          style={{ borderBottom: "1px solid var(--border-subtle)", transition: "background-color 0.15s ease" }}
+                          className="org-table-row"
+                        >
+                          {/* Administrator Name & Email */}
+                          <td style={{ padding: "0.85rem 1rem" }}>
+                            <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                              {admin.firstName} {admin.lastName || ""}
+                            </div>
+                            <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)", fontFamily: "monospace", marginTop: "2px" }}>
+                              {admin.email}
+                            </div>
+                          </td>
+
+                          {/* Agency Container */}
+                          <td style={{ padding: "0.85rem 1rem" }}>
+                            <div style={{ fontWeight: 500, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: "0.4rem" }}>
+                              <Building2 size={14} style={{ color: "var(--accent-emerald)", flexShrink: 0 }} />
+                              <span>{admin.organizationName || "Agency Container"}</span>
+                            </div>
+                            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontFamily: "monospace", marginTop: "2px" }}>
+                              {admin.organizationId}
+                            </div>
+                          </td>
+
+                          {/* Platform Role */}
+                          <td style={{ padding: "0.85rem 1rem" }}>
+                            <span
+                              className="badge"
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "4px",
+                                backgroundColor: "rgba(99, 102, 241, 0.15)",
+                                color: "#818cf8",
+                                fontSize: "0.75rem",
+                                padding: "2px 8px",
+                                borderRadius: "4px",
+                                fontWeight: 600,
+                              }}
+                            >
+                              <ShieldCheck size={12} />
+                              {admin.platformRole}
+                            </span>
+                          </td>
+
+                          {/* Active Assignments */}
+                          <td style={{ padding: "0.85rem 1rem" }}>
+                            {(admin.activeAssignmentsCount ?? 0) > 0 ? (
+                              <span
+                                className="badge"
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: "4px",
+                                  backgroundColor: "rgba(16, 185, 129, 0.15)",
+                                  color: "var(--accent-emerald)",
+                                  fontSize: "0.75rem",
+                                  padding: "2px 8px",
+                                  borderRadius: "4px",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {admin.activeAssignmentsCount} assigned {admin.activeAssignmentsCount === 1 ? "org" : "orgs"}
+                              </span>
+                            ) : (
+                              <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                                0 (Unassigned)
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Created Date */}
+                          <td style={{ padding: "0.85rem 1rem", color: "var(--text-secondary)", fontSize: "0.82rem" }}>
+                            {admin.createdAt ? new Date(admin.createdAt).toLocaleDateString(undefined, {
+                              year: "numeric",
+                              month: "short",
+                              day: "numeric",
+                            }) : "—"}
+                          </td>
+
+                          {/* Actions */}
+                          <td style={{ padding: "0.85rem 1rem", textAlign: "right" }}>
+                            <button
+                              type="button"
+                              onClick={() => handleCopy(admin.id)}
+                              className="btn btn-secondary"
+                              style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "0.35rem",
+                                padding: "0.3rem 0.65rem",
+                                fontSize: "0.75rem",
+                              }}
+                              title="Copy Admin User ID"
+                              aria-label="Copy Admin User ID"
+                            >
+                              {copiedId === admin.id ? (
+                                <Check size={12} style={{ color: "var(--accent-emerald)" }} />
+                              ) : (
+                                <Copy size={12} />
+                              )}
+                              <span>Copy ID</span>
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
       {/* MODAL: ORGANIZATION DETAILS */}
       {selectedOrgId && (
         <div className="master-admin-modal-backdrop" onClick={() => setSelectedOrgId(null)}>
@@ -2530,7 +3073,7 @@ export const MasterAdminPage: React.FC = () => {
             <div className="master-admin-modal-header">
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
                 {confirmActionOrg.action === "archive" ? (
-                  <AlertTriangle size={20} style={{ color: "#f87171" }} />
+                  <AlertTriangle size={20} aria-hidden="true" focusable={false} style={{ color: "#f87171" }} />
                 ) : (
                   <RotateCcw size={20} style={{ color: "var(--accent-emerald)" }} />
                 )}
@@ -2677,7 +3220,7 @@ export const MasterAdminPage: React.FC = () => {
                     }}
                   >
                     <div style={{ display: "flex", gap: "0.6rem", alignItems: "flex-start" }}>
-                      <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: "2px" }} />
+                      <AlertTriangle size={18} aria-hidden="true" focusable={false} style={{ flexShrink: 0, marginTop: "2px" }} />
                       <div>
                         <strong style={{ display: "block", color: "#fef3c7", marginBottom: "3px" }}>
                           Warning: Modifying Active Platform Integration
@@ -2887,7 +3430,7 @@ export const MasterAdminPage: React.FC = () => {
           >
             <div className="master-admin-modal-header">
               <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <AlertTriangle size={20} style={{ color: "#f87171" }} />
+                <AlertTriangle size={20} aria-hidden="true" focusable={false} style={{ color: "#f87171" }} />
                 <h3 id="disconnect-modal-title" style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0, color: "var(--text-primary)" }}>
                   Disconnect Shared WhatsApp Account?
                 </h3>
@@ -2989,7 +3532,9 @@ export const MasterAdminPage: React.FC = () => {
       {isAssignModalOpen && (
         <div
           className="master-admin-modal-backdrop"
-          onClick={closeAssignModal}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeAssignModal();
+          }}
           role="presentation"
         >
           <div
@@ -3056,7 +3601,10 @@ export const MasterAdminPage: React.FC = () => {
                   <select
                     id="assign-org-select"
                     value={assignOrgId}
-                    onChange={(e) => setAssignOrgId(e.target.value)}
+                    onChange={(e) => {
+                      setAssignOrgId(e.target.value);
+                      if (assignModalError) setAssignModalError(null);
+                    }}
                     disabled={isSubmittingAssign}
                     required
                     style={{
@@ -3114,7 +3662,10 @@ export const MasterAdminPage: React.FC = () => {
                     <select
                       id="assign-user-select"
                       value={assignUserId}
-                      onChange={(e) => setAssignUserId(e.target.value)}
+                      onChange={(e) => {
+                        setAssignUserId(e.target.value);
+                        if (assignModalError) setAssignModalError(null);
+                      }}
                       disabled={isSubmittingAssign}
                       required
                       style={{
@@ -3184,7 +3735,7 @@ export const MasterAdminPage: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmittingAssign || !assignOrgId || !assignUserId}
+                  disabled={isSubmittingAssign}
                   className="btn btn-primary"
                   style={{
                     fontSize: "0.85rem",
@@ -3208,7 +3759,9 @@ export const MasterAdminPage: React.FC = () => {
       {confirmRevokeAssignment && (
         <div
           className="master-admin-modal-backdrop"
-          onClick={closeRevokeModal}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeRevokeModal();
+          }}
           role="presentation"
         >
           <div
@@ -3347,6 +3900,286 @@ export const MasterAdminPage: React.FC = () => {
                 {isSubmittingRevoke ? "Revoking..." : "Confirm Revoke"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CREATE DELEGATED ADMIN ACCOUNT */}
+      {isCreateAdminModalOpen && (
+        <div
+          className="master-admin-modal-backdrop"
+          onClick={closeCreateAdminModal}
+          role="presentation"
+        >
+          <div
+            className="master-admin-modal"
+            style={{ maxWidth: "540px" }}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-admin-modal-title"
+          >
+            <div className="master-admin-modal-header">
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                <ShieldCheck size={20} style={{ color: "var(--accent-emerald)" }} />
+                <h3 id="create-admin-modal-title" style={{ fontSize: "1.1rem", fontWeight: 600, margin: 0, color: "var(--text-primary)" }}>
+                  Create Delegated Administrator
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeCreateAdminModal}
+                disabled={isSubmittingCreateAdmin}
+                style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: isSubmittingCreateAdmin ? "not-allowed" : "pointer" }}
+                aria-label="Close dialog"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateAdminSubmit} noValidate>
+              <div className="master-admin-modal-body">
+                <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", marginTop: 0, marginBottom: "1.25rem", lineHeight: 1.5 }}>
+                  Provision a new agency administrator account (<code>DELEGATED_ADMIN</code>). You directly configure their initial login credentials. The administrator will be isolated to their own agency container until customer organizations are explicitly assigned in the Business Assignments tab.
+                </p>
+
+                {createAdminModalError && (
+                  <div
+                    role="alert"
+                    style={{
+                      padding: "0.75rem 1rem",
+                      borderRadius: "6px",
+                      backgroundColor: "rgba(239, 68, 68, 0.12)",
+                      border: "1px solid rgba(239, 68, 68, 0.35)",
+                      color: "#f87171",
+                      fontSize: "0.82rem",
+                      marginBottom: "1.25rem",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <AlertCircle size={16} style={{ flexShrink: 0 }} />
+                    <span>{createAdminModalError}</span>
+                  </div>
+                )}
+
+                {/* Name Row */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginBottom: "1rem" }}>
+                  <div>
+                    <label
+                      htmlFor="admin-first-name"
+                      style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.35rem" }}
+                    >
+                      First Name <span style={{ color: "#f87171" }}>*</span>
+                    </label>
+                    <input
+                      id="admin-first-name"
+                      type="text"
+                      value={createAdminFirstName}
+                      onChange={(e) => setCreateAdminFirstName(e.target.value)}
+                      placeholder="Jane"
+                      disabled={isSubmittingCreateAdmin}
+                      required
+                      style={{
+                        width: "100%",
+                        padding: "0.6rem 0.85rem",
+                        fontSize: "0.875rem",
+                        borderRadius: "6px",
+                        border: "1px solid var(--border-subtle)",
+                        backgroundColor: "rgba(15, 23, 42, 0.8)",
+                        color: "var(--text-primary)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="admin-last-name"
+                      style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.35rem" }}
+                    >
+                      Last Name <span style={{ color: "var(--text-muted)", fontWeight: "normal" }}>(Optional)</span>
+                    </label>
+                    <input
+                      id="admin-last-name"
+                      type="text"
+                      value={createAdminLastName}
+                      onChange={(e) => setCreateAdminLastName(e.target.value)}
+                      placeholder="Doe"
+                      disabled={isSubmittingCreateAdmin}
+                      style={{
+                        width: "100%",
+                        padding: "0.6rem 0.85rem",
+                        fontSize: "0.875rem",
+                        borderRadius: "6px",
+                        border: "1px solid var(--border-subtle)",
+                        backgroundColor: "rgba(15, 23, 42, 0.8)",
+                        color: "var(--text-primary)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {/* Email Field */}
+                <div style={{ marginBottom: "1rem" }}>
+                  <label
+                    htmlFor="admin-email"
+                    style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.35rem" }}
+                  >
+                    Email Address <span style={{ color: "#f87171" }}>*</span>
+                  </label>
+                  <input
+                    id="admin-email"
+                    type="email"
+                    value={createAdminEmail}
+                    onChange={(e) => setCreateAdminEmail(e.target.value)}
+                    placeholder="admin@agency.com"
+                    disabled={isSubmittingCreateAdmin}
+                    required
+                    style={{
+                      width: "100%",
+                      padding: "0.6rem 0.85rem",
+                      fontSize: "0.875rem",
+                      borderRadius: "6px",
+                      border: "1px solid var(--border-subtle)",
+                      backgroundColor: "rgba(15, 23, 42, 0.8)",
+                      color: "var(--text-primary)",
+                      boxSizing: "border-box",
+                    }}
+                  />
+                </div>
+
+                {/* Password Field */}
+                <div style={{ marginBottom: "1rem" }}>
+                  <label
+                    htmlFor="admin-password"
+                    style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.35rem" }}
+                  >
+                    Account Password <span style={{ color: "#f87171" }}>*</span>
+                  </label>
+                  <div style={{ position: "relative" }}>
+                    <input
+                      id="admin-password"
+                      type={showAdminPassword ? "text" : "password"}
+                      value={createAdminPassword}
+                      onChange={(e) => setCreateAdminPassword(e.target.value)}
+                      placeholder="Enter strong password (min 8 chars)"
+                      disabled={isSubmittingCreateAdmin}
+                      required
+                      style={{
+                        width: "100%",
+                        padding: "0.6rem 2.5rem 0.6rem 0.85rem",
+                        fontSize: "0.875rem",
+                        borderRadius: "6px",
+                        border: "1px solid var(--border-subtle)",
+                        backgroundColor: "rgba(15, 23, 42, 0.8)",
+                        color: "var(--text-primary)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminPassword(!showAdminPassword)}
+                      style={{
+                        position: "absolute",
+                        right: "10px",
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        background: "none",
+                        border: "none",
+                        color: "var(--text-muted)",
+                        cursor: "pointer",
+                        padding: "2px",
+                      }}
+                      aria-label={showAdminPassword ? "Hide password" : "Show password"}
+                    >
+                      {showAdminPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "4px" }}>
+                    Must be 8–128 characters, with at least one uppercase, one lowercase, and one numeric digit.
+                  </div>
+                </div>
+
+                {/* Confirm Password Field */}
+                <div style={{ marginBottom: "0.5rem" }}>
+                  <label
+                    htmlFor="admin-confirm-password"
+                    style={{ display: "block", fontSize: "0.82rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.35rem" }}
+                  >
+                    Confirm Password <span style={{ color: "#f87171" }}>*</span>
+                  </label>
+                  <div style={{ position: "relative" }}>
+                    <input
+                      id="admin-confirm-password"
+                      type={showAdminConfirmPassword ? "text" : "password"}
+                      value={createAdminConfirmPassword}
+                      onChange={(e) => setCreateAdminConfirmPassword(e.target.value)}
+                      placeholder="Re-enter chosen password"
+                      disabled={isSubmittingCreateAdmin}
+                      required
+                      style={{
+                        width: "100%",
+                        padding: "0.6rem 2.5rem 0.6rem 0.85rem",
+                        fontSize: "0.875rem",
+                        borderRadius: "6px",
+                        border: "1px solid var(--border-subtle)",
+                        backgroundColor: "rgba(15, 23, 42, 0.8)",
+                        color: "var(--text-primary)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminConfirmPassword(!showAdminConfirmPassword)}
+                      style={{
+                        position: "absolute",
+                        right: "10px",
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        background: "none",
+                        border: "none",
+                        color: "var(--text-muted)",
+                        cursor: "pointer",
+                        padding: "2px",
+                      }}
+                      aria-label={showAdminConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                    >
+                      {showAdminConfirmPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="master-admin-modal-footer">
+                <button
+                  type="button"
+                  onClick={closeCreateAdminModal}
+                  disabled={isSubmittingCreateAdmin}
+                  className="btn btn-secondary"
+                  style={{ fontSize: "0.85rem", cursor: isSubmittingCreateAdmin ? "not-allowed" : "pointer" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingCreateAdmin || !createAdminFirstName.trim() || !createAdminEmail.trim() || !createAdminPassword || !createAdminConfirmPassword}
+                  className="btn btn-primary"
+                  style={{
+                    fontSize: "0.85rem",
+                    backgroundColor: "var(--accent-emerald)",
+                    color: "#ffffff",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                  }}
+                >
+                  {isSubmittingCreateAdmin && <RefreshCw size={14} className="animate-spin" />}
+                  {isSubmittingCreateAdmin ? "Creating..." : "Create Delegated Admin"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

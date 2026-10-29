@@ -8,6 +8,8 @@ import {
   queryCampaignsSchema,
   campaignIdParamSchema,
   scheduleCampaignSchema,
+  approveCampaignSchema,
+  rejectCampaignSchema,
 } from "../validators/campaign.validator.js";
 
 const campaignRouter = Router();
@@ -109,6 +111,26 @@ campaignRouter.post(
     body: scheduleCampaignSchema,
   }),
   campaignController.schedule
+);
+
+// Approve a scheduled campaign (Authorized Delegated Admin or Master Admin override)
+campaignRouter.post(
+  "/:id/approve",
+  validateRequest({
+    params: campaignIdParamSchema,
+    body: approveCampaignSchema,
+  }),
+  campaignController.approve
+);
+
+// Reject a scheduled campaign with required reason (Authorized Delegated Admin or Master Admin override)
+campaignRouter.post(
+  "/:id/reject",
+  validateRequest({
+    params: campaignIdParamSchema,
+    body: rejectCampaignSchema,
+  }),
+  campaignController.reject
 );
 
 // Cancel a scheduled or draft campaign before dispatch

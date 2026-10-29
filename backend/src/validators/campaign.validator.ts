@@ -12,6 +12,8 @@ export const CampaignStatusEnum = z.enum([
 
 export const AudienceTypeEnum = z.enum(["MOCK", "CONTACT_LIST", "SEGMENT"]);
 
+export const MIN_SCHEDULE_LEAD_MS = 5 * 60 * 1000; // 5 minutes minimum lead time
+
 /**
  * Validation schema for creating a new Campaign draft
  */
@@ -85,9 +87,9 @@ export const createCampaignSchema = z.object({
     .refine(
       (val) => {
         if (!val) return true;
-        return new Date(val).getTime() > Date.now();
+        return new Date(val).getTime() >= Date.now() + MIN_SCHEDULE_LEAD_MS;
       },
-      { message: "scheduledAt must be a future timestamp" }
+      { message: "scheduledAt must be at least 5 minutes in the future" }
     ),
   clientRequestId: z
     .string()
@@ -173,9 +175,9 @@ export const updateCampaignSchema = z.object({
     .refine(
       (val) => {
         if (!val) return true;
-        return new Date(val).getTime() > Date.now();
+        return new Date(val).getTime() >= Date.now() + MIN_SCHEDULE_LEAD_MS;
       },
-      { message: "scheduledAt must be a future timestamp" }
+      { message: "scheduledAt must be at least 5 minutes in the future" }
     ),
   clientRequestId: z
     .string()
@@ -243,12 +245,44 @@ export const scheduleCampaignSchema = z.object({
     .string({ required_error: "scheduledAt is required" })
     .datetime({ message: "scheduledAt must be a valid ISO-8601 UTC date string" })
     .refine(
-      (val) => new Date(val).getTime() > Date.now(),
-      { message: "scheduledAt must be a future timestamp" }
+      (val) => new Date(val).getTime() >= Date.now() + MIN_SCHEDULE_LEAD_MS,
+      { message: "scheduledAt must be at least 5 minutes in the future" }
     ),
+});
+
+export const CampaignApprovalStatusEnum = z.enum([
+  "NOT_REQUIRED",
+  "PENDING",
+  "APPROVED",
+  "REJECTED",
+]);
+
+/**
+ * Validation schema for approving a scheduled campaign
+ */
+export const approveCampaignSchema = z.object({
+  notes: z
+    .string()
+    .trim()
+    .max(500, "Approval notes cannot exceed 500 characters")
+    .optional()
+    .nullable(),
+});
+
+/**
+ * Validation schema for rejecting a scheduled campaign
+ */
+export const rejectCampaignSchema = z.object({
+  reason: z
+    .string({ required_error: "Rejection reason is required" })
+    .trim()
+    .min(3, "Rejection reason must be at least 3 characters")
+    .max(500, "Rejection reason cannot exceed 500 characters"),
 });
 
 export type CreateCampaignInput = z.infer<typeof createCampaignSchema>;
 export type UpdateCampaignInput = z.infer<typeof updateCampaignSchema>;
 export type QueryCampaignsInput = z.infer<typeof queryCampaignsSchema>;
 export type ScheduleCampaignInput = z.infer<typeof scheduleCampaignSchema>;
+export type ApproveCampaignInput = z.infer<typeof approveCampaignSchema>;
+export type RejectCampaignInput = z.infer<typeof rejectCampaignSchema>;

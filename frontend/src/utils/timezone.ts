@@ -68,14 +68,19 @@ export function parseScheduleToUTC(dateStr: string, timeStr: string): string {
   return parsed.toISOString();
 }
 
+export const MIN_SCHEDULE_LEAD_MS = 5 * 60 * 1000; // 5 minutes minimum lead time
+
 /**
- * Validate whether a date/time combination in Asia/Kolkata is strictly in the future
+ * Validate whether a date/time combination in Asia/Kolkata is at least MIN_SCHEDULE_LEAD_MS in the future
  */
-export function isValidFutureSchedule(isoString: string): boolean {
+export function isValidFutureSchedule(
+  isoString: string,
+  minLeadMs: number = MIN_SCHEDULE_LEAD_MS
+): boolean {
   if (!isoString) return false;
   const target = new Date(isoString);
   if (isNaN(target.getTime())) return false;
-  return target.getTime() > Date.now();
+  return target.getTime() >= Date.now() + minLeadMs;
 }
 
 /**
@@ -92,7 +97,7 @@ export function getDefaultScheduleInputs(): { date: string; time: string; minDat
     day: "2-digit",
   }).format(now);
 
-  // Get current hour in IST
+  // Get current hour and minute in IST
   const istHours = parseInt(
     new Intl.DateTimeFormat("en-US", {
       timeZone: DEFAULT_BUSINESS_TIMEZONE,
@@ -101,13 +106,25 @@ export function getDefaultScheduleInputs(): { date: string; time: string; minDat
     }).format(now),
     10
   );
+  const istMinutes = parseInt(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: DEFAULT_BUSINESS_TIMEZONE,
+      minute: "numeric",
+    }).format(now),
+    10
+  );
 
-  // Default to 1 hour from now or tomorrow 10:00 AM
+  // Default to next hour rounded or tomorrow 10:00 AM.
+  // If top of the next hour is within 5 minutes, advance by another hour so default is well ahead.
   let defaultDate = istDateParts;
   let defaultHour = (istHours + 1) % 24;
   let defaultMinute = 0;
 
-  if (istHours >= 22) {
+  if (istMinutes >= 55) {
+    defaultHour = (defaultHour + 1) % 24;
+  }
+
+  if (istHours >= 22 || (istHours === 21 && istMinutes >= 55)) {
     // Late night in IST, suggest tomorrow 10:00 AM
     const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
     defaultDate = new Intl.DateTimeFormat("en-CA", {
@@ -117,6 +134,7 @@ export function getDefaultScheduleInputs(): { date: string; time: string; minDat
       day: "2-digit",
     }).format(tomorrow);
     defaultHour = 10;
+    defaultMinute = 0;
   }
 
   const paddedHour = String(defaultHour).padStart(2, "0");

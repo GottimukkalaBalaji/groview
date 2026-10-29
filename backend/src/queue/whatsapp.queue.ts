@@ -16,28 +16,45 @@ export interface WhatsAppDispatchJobData {
   contactId?: string | null;
   clientRequestId?: string | null;
   dispatchRun?: number;
+  scheduledAt?: string | null;
+}
+
+export interface EnqueueDispatchOptions {
+  delay?: number;
 }
 
 let whatsappQueueInstance: Queue<WhatsAppDispatchJobData> | null = null;
 let whatsappQueueEventsInstance: QueueEvents | null = null;
 
 /**
+ * Sets the WhatsApp dispatch queue instance for testing purposes.
+ */
+export function setWhatsAppDispatchQueueForTest(
+  queue: Queue<WhatsAppDispatchJobData> | null
+): void {
+  whatsappQueueInstance = queue;
+}
+
+/**
  * Returns or initializes the BullMQ queue for WhatsApp message dispatches.
  */
 export function getWhatsAppDispatchQueue(): Queue<WhatsAppDispatchJobData> {
+  if (whatsappQueueInstance) {
+    return whatsappQueueInstance;
+  }
+
   if (!isRedisConfigured()) {
     throw new Error(
       "Cannot initialize WhatsApp dispatch queue: REDIS_URL is not configured."
     );
   }
 
-  if (!whatsappQueueInstance) {
-    const redisOptions = getBullMQRedisOptions();
-    const redisUrl = process.env.REDIS_URL!;
+  const redisOptions = getBullMQRedisOptions();
+  const redisUrl = process.env.REDIS_URL!;
 
-    whatsappQueueInstance = new Queue<WhatsAppDispatchJobData>(
-      WHATSAPP_DISPATCH_QUEUE_NAME,
-      {
+  whatsappQueueInstance = new Queue<WhatsAppDispatchJobData>(
+    WHATSAPP_DISPATCH_QUEUE_NAME,
+    {
         connection: {
           ...redisOptions,
           url: redisUrl,
@@ -57,7 +74,6 @@ export function getWhatsAppDispatchQueue(): Queue<WhatsAppDispatchJobData> {
     whatsappQueueInstance.on("error", (err) => {
       logger.error("WhatsApp dispatch queue error", err);
     });
-  }
 
   return whatsappQueueInstance;
 }
@@ -73,7 +89,7 @@ export interface EnqueueDispatchResult {
 export async function getWhatsAppDispatchJob(
   messageId: string
 ): Promise<Job<WhatsAppDispatchJobData> | undefined> {
-  if (!isRedisConfigured()) {
+  if (!whatsappQueueInstance && !isRedisConfigured()) {
     return undefined;
   }
   const queue = getWhatsAppDispatchQueue();
@@ -87,7 +103,8 @@ export async function getWhatsAppDispatchJob(
  * Checks for existing job in BullMQ to accurately report whether job was newly enqueued or already present.
  */
 export async function enqueueWhatsAppDispatchJob(
-  jobData: WhatsAppDispatchJobData
+  jobData: WhatsAppDispatchJobData,
+  options?: EnqueueDispatchOptions
 ): Promise<EnqueueDispatchResult> {
   const queue = getWhatsAppDispatchQueue();
 
@@ -102,16 +119,35 @@ export async function enqueueWhatsAppDispatchJob(
 
   const job = await queue.add("dispatch", jobData, {
     jobId,
+    ...(options?.delay && options.delay > 0 ? { delay: options.delay } : {}),
   });
 
-  logger.info(`Enqueued WhatsApp dispatch job ${job.id} for message ${jobData.messageId}`);
+  logger.info(
+    `Enqueued WhatsApp dispatch job ${job.id} for message ${jobData.messageId}${
+      options?.delay && options.delay > 0 ? ` (delayed by ${options.delay}ms)` : ""
+    }`
+  );
   return { job, alreadyExisted: false };
 }
 
-export function setWhatsAppDispatchQueueForTest(
-  queue: Queue<WhatsAppDispatchJobData> | null
-): void {
-  whatsappQueueInstance = queue;
+/**
+ * Removes a pending or delayed WhatsApp dispatch job from BullMQ queue, if present.
+ */
+export async function removeWhatsAppDispatchJob(messageId: string): Promise<boolean> {
+  if (!whatsappQueueInstance && !isRedisConfigured()) {
+    return false;
+  }
+  try {
+    const job = await getWhatsAppDispatchJob(messageId);
+    if (job) {
+      await job.remove();
+      logger.info(`Removed BullMQ dispatch job msg_${messageId}`);
+      return true;
+    }
+  } catch (err) {
+    logger.warn(`Failed to remove BullMQ dispatch job msg_${messageId}: ${(err as Error)?.message}`);
+  }
+  return false;
 }
 
 export interface SafeRecoverJobParams {
@@ -192,8 +228,19 @@ export async function inspectAndRecoverDispatchJob(
 
   // 3. If no existing BullMQ job, safely enqueue with deterministic jobId
   if (!existingJob) {
-    const job = await queue.add("dispatch", jobData, { jobId });
-    logger.info(`[QueueRecovery] Enqueued missing BullMQ job ${jobId} for message ${jobData.messageId}`);
+    const delay = jobData.scheduledAt
+      ? Math.max(0, new Date(jobData.scheduledAt).getTime() - Date.now())
+      : 0;
+
+    const job = await queue.add("dispatch", jobData, {
+      jobId,
+      ...(delay > 0 ? { delay } : {}),
+    });
+    logger.info(
+      `[QueueRecovery] Enqueued missing BullMQ job ${jobId} for message ${jobData.messageId}${
+        delay > 0 ? ` (delayed by ${delay}ms)` : ""
+      }`
+    );
     return {
       status: "newly_enqueued",
       jobId,

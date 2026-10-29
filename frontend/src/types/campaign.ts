@@ -9,12 +9,26 @@ export type CampaignStatus =
 
 export type AudienceType = "MOCK" | "CONTACT_LIST" | "SEGMENT";
 
+export type CampaignApprovalStatus =
+  | "NOT_REQUIRED"
+  | "PENDING"
+  | "APPROVED"
+  | "REJECTED";
+
 export interface Campaign {
   id: string;
   organizationId: string;
   name: string;
   description: string | null;
   status: CampaignStatus;
+  approvalStatus?: CampaignApprovalStatus;
+  approvedAt?: string | null;
+  approvedBy?: string | null;
+  approvalNotes?: string | null;
+  rejectedAt?: string | null;
+  rejectedBy?: string | null;
+  rejectionReason?: string | null;
+  dispatchRun?: number;
   templateId: string;
   templateName: string;
   templateLanguage: string;
@@ -168,6 +182,14 @@ export interface SchedulerStatusResponse {
   intervalMs: number;
   maxLatenessHours: number;
   timestamp: string;
+}
+
+export interface ApproveCampaignPayload {
+  notes?: string;
+}
+
+export interface RejectCampaignPayload {
+  reason: string;
 }
 
 

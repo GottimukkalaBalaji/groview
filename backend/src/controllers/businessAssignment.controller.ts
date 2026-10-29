@@ -1,9 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import { businessAssignmentService } from "../services/businessAssignment.service.js";
 import {
-  createBusinessAssignmentSchema,
-  revokeBusinessAssignmentSchema,
-  queryBusinessAssignmentsSchema,
+  CreateBusinessAssignmentInput,
+  RevokeBusinessAssignmentInput,
+  QueryBusinessAssignmentsInput,
 } from "../validators/businessAssignment.validator.js";
 import { sendSuccess } from "../utils/response.js";
 import { UnauthorizedError, ForbiddenError } from "../utils/errors.js";
@@ -16,7 +16,7 @@ export const businessAssignmentController = {
    */
   async getAssignments(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const query = queryBusinessAssignmentsSchema.parse(req.query);
+      const query = (req.query || {}) as unknown as QueryBusinessAssignmentsInput;
       const result = await businessAssignmentService.getAssignments(query);
       sendSuccess(res, result);
     } catch (error) {
@@ -30,7 +30,7 @@ export const businessAssignmentController = {
    */
   async createAssignment(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const body = createBusinessAssignmentSchema.parse(req.body);
+      const body = req.body as CreateBusinessAssignmentInput;
       const assignedById = req.context?.userId || null;
       const result = await businessAssignmentService.createAssignment({
         ...body,
@@ -49,7 +49,7 @@ export const businessAssignmentController = {
   async revokeAssignment(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const id = req.params.id;
-      const body = revokeBusinessAssignmentSchema.parse(req.body);
+      const body = (req.body || {}) as RevokeBusinessAssignmentInput;
       const revokedById = req.context?.userId || null;
       const result = await businessAssignmentService.revokeAssignment(id, {
         ...body,

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useContext } from "react";
 import {
   X,
   Send,
@@ -12,6 +12,8 @@ import {
   RefreshCw,
   Loader2,
   XCircle,
+  Check,
+  Ban,
 } from "lucide-react";
 import { Campaign, CampaignStatus, CampaignMessageItem } from "../types/campaign.js";
 import { WhatsAppPhonePreview } from "./WhatsAppPhonePreview.js";
@@ -20,6 +22,7 @@ import { apiClient } from "../services/api.js";
 import { getCustomerCampaignStatus } from "../utils/campaignStatus.js";
 import { formatInBusinessTimezone } from "../utils/timezone.js";
 import { useAutoPolling } from "../utils/useAutoPolling.js";
+import { AuthContext } from "../context/AuthContext.js";
 
 export const getCustomerFriendlyStatus = (status: string): string => {
   switch (status) {
@@ -94,6 +97,63 @@ export const CampaignDetailsModal: React.FC<CampaignDetailsModalProps> = ({
   }, [campaign]);
 
   const activeCampaign = currentCampaign || campaign;
+
+  const auth = useContext(AuthContext);
+  const isReviewer = Boolean(
+    auth?.platformCapabilities?.platformRole === "PLATFORM_MASTER_ADMIN" ||
+    auth?.platformCapabilities?.platformRole === "DELEGATED_ADMIN"
+  );
+
+  const [isSubmittingReview, setIsSubmittingReview] = useState<boolean>(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [showRejectModal, setShowRejectModal] = useState<boolean>(false);
+  const [rejectionReasonInput, setRejectionReasonInput] = useState<string>("");
+  const [showApproveModal, setShowApproveModal] = useState<boolean>(false);
+  const [approvalNotesInput, setApprovalNotesInput] = useState<string>("");
+
+  const handleApprove = async () => {
+    if (!activeCampaign) return;
+    setIsSubmittingReview(true);
+    setReviewError(null);
+    try {
+      const res = await apiClient.approveCampaign(activeCampaign.id, approvalNotesInput.trim() || undefined);
+      if (res && res.success && res.data) {
+        setCurrentCampaign(res.data);
+        onCampaignUpdated?.(res.data);
+        setShowApproveModal(false);
+      } else {
+        setReviewError("Failed to approve campaign");
+      }
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : "Failed to approve campaign");
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!activeCampaign) return;
+    if (!rejectionReasonInput.trim() || rejectionReasonInput.trim().length < 3) {
+      setReviewError("Please provide a reason of at least 3 characters.");
+      return;
+    }
+    setIsSubmittingReview(true);
+    setReviewError(null);
+    try {
+      const res = await apiClient.rejectCampaign(activeCampaign.id, rejectionReasonInput.trim());
+      if (res && res.success && res.data) {
+        setCurrentCampaign(res.data);
+        onCampaignUpdated?.(res.data);
+        setShowRejectModal(false);
+      } else {
+        setReviewError("Failed to reject campaign");
+      }
+    } catch (err) {
+      setReviewError(err instanceof Error ? err.message : "Failed to reject campaign");
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
 
   const fetchCampaignAndMessages = useCallback(
     async (campId: string, isBackground: boolean = false) => {
@@ -286,6 +346,18 @@ export const CampaignDetailsModal: React.FC<CampaignDetailsModalProps> = ({
                 color: "#fbbf24",
                 border: "1px solid rgba(245, 158, 11, 0.35)",
               }
+            : statusMeta.label === "Changes Requested"
+            ? {
+                background: "rgba(244, 63, 94, 0.15)",
+                color: "#fb7185",
+                border: "1px solid rgba(244, 63, 94, 0.35)",
+              }
+            : statusMeta.label === "Pending Admin Approval"
+            ? {
+                background: "rgba(245, 158, 11, 0.15)",
+                color: "#fbbf24",
+                border: "1px solid rgba(245, 158, 11, 0.35)",
+              }
             : item.status === "CANCELLED"
             ? {
                 background: "rgba(113, 113, 122, 0.15)",
@@ -295,7 +367,11 @@ export const CampaignDetailsModal: React.FC<CampaignDetailsModalProps> = ({
             : undefined
         }
       >
-        {(item.status === "COMPLETED" || item.status === "FAILED") && (
+        {statusMeta.label === "Changes Requested" && <XCircle size={12} />}
+        {statusMeta.label === "Pending Admin Approval" && <Clock size={12} />}
+        {(item.status === "COMPLETED" || item.status === "FAILED") &&
+          statusMeta.label !== "Changes Requested" &&
+          statusMeta.label !== "Pending Admin Approval" && (
           statusMeta.label === "Completed with issues" ? (
             <AlertCircle size={12} />
           ) : statusMeta.label === "Delivery confirmation pending" ? (
@@ -309,7 +385,7 @@ export const CampaignDetailsModal: React.FC<CampaignDetailsModalProps> = ({
         {item.status === "SENDING" && <Radio size={12} className="pulsing" />}
         {item.status === "QUEUED" && <Clock size={12} />}
         {item.status === "SCHEDULED" && <Clock size={12} />}
-        {item.status === "DRAFT" && <FileEdit size={12} />}
+        {item.status === "DRAFT" && statusMeta.label !== "Changes Requested" && statusMeta.label !== "Pending Admin Approval" && <FileEdit size={12} />}
         {item.status === "CANCELLED" && <XCircle size={12} />}
         <span>{statusMeta.label}</span>
       </span>
@@ -349,6 +425,86 @@ export const CampaignDetailsModal: React.FC<CampaignDetailsModalProps> = ({
             <X size={18} />
           </button>
         </div>
+
+        {reviewError && (
+          <div
+            style={{
+              padding: "0.75rem 1.25rem",
+              background: "rgba(239, 68, 68, 0.15)",
+              borderBottom: "1px solid rgba(239, 68, 68, 0.3)",
+              color: "#f87171",
+              fontSize: "0.85rem",
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem",
+            }}
+          >
+            <AlertCircle size={16} />
+            <span>{reviewError}</span>
+          </div>
+        )}
+
+        {/* Approval Lifecycle Banners */}
+        {activeCampaign.approvalStatus === "REJECTED" && (
+          <div
+            style={{
+              padding: "0.85rem 1.25rem",
+              background: "rgba(244, 63, 94, 0.12)",
+              borderBottom: "1px solid rgba(244, 63, 94, 0.3)",
+              color: "#fb7185",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: 600 }}>
+              <XCircle size={16} />
+              <span>Campaign Changes Requested by Reviewer</span>
+            </div>
+            <p style={{ margin: "0.35rem 0 0.25rem 0", fontSize: "0.85rem", color: "#fecdd3" }}>
+              <strong>Reason:</strong> {activeCampaign.rejectionReason || "Please review and adjust this campaign."}
+            </p>
+            <span style={{ fontSize: "0.75rem", color: "#fda4af" }}>
+              Choose a new future schedule or edit campaign content, then resubmit for review.
+            </span>
+          </div>
+        )}
+
+        {activeCampaign.approvalStatus === "PENDING" && (
+          <div
+            style={{
+              padding: "0.85rem 1.25rem",
+              background: "rgba(245, 158, 11, 0.12)",
+              borderBottom: "1px solid rgba(245, 158, 11, 0.3)",
+              color: "#fbbf24",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: 600 }}>
+              <Clock size={16} />
+              <span>Awaiting Administrator Approval</span>
+            </div>
+            <p style={{ margin: "0.35rem 0 0 0", fontSize: "0.85rem", color: "#fde68a" }}>
+              This campaign is scheduled for {formatInBusinessTimezone(activeCampaign.scheduledAt)} and requires approval by an assigned administrator before dispatch.
+            </p>
+          </div>
+        )}
+
+        {activeCampaign.approvalStatus === "APPROVED" && (
+          <div
+            style={{
+              padding: "0.85rem 1.25rem",
+              background: "rgba(16, 185, 129, 0.12)",
+              borderBottom: "1px solid rgba(16, 185, 129, 0.3)",
+              color: "#34d399",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontWeight: 600 }}>
+              <CheckCircle2 size={16} />
+              <span>Campaign Approved for Scheduled Dispatch</span>
+            </div>
+            <p style={{ margin: "0.35rem 0 0 0", fontSize: "0.85rem", color: "#a7f3d0" }}>
+              Approved by {activeCampaign.approvedBy || "Administrator"}{activeCampaign.approvedAt ? ` on ${formatInBusinessTimezone(activeCampaign.approvedAt)}` : ""}.
+              {activeCampaign.approvalNotes ? ` Note: "${activeCampaign.approvalNotes}"` : ""}
+            </p>
+          </div>
+        )}
 
         <div className="modal-body details-grid">
           {/* Left Column: Metadata */}
@@ -697,13 +853,17 @@ export const CampaignDetailsModal: React.FC<CampaignDetailsModalProps> = ({
                 onClose();
                 onEdit(activeCampaign);
               }}
+              aria-label={activeCampaign.approvalStatus === "REJECTED" ? "Edit & Resubmit" : "Edit Draft"}
             >
               <Edit3 size={15} />
-              <span>Edit Draft</span>
+              <span>{activeCampaign.approvalStatus === "REJECTED" ? "Edit & Resubmit" : "Edit Draft"}</span>
             </button>
           )}
 
-          {activeCampaign.status === "DRAFT" && onLaunch && (
+          {activeCampaign.status === "DRAFT" &&
+            activeCampaign.approvalStatus !== "PENDING" &&
+            activeCampaign.approvalStatus !== "REJECTED" &&
+            onLaunch && (
             <button
               type="button"
               className="btn-primary"
@@ -716,6 +876,43 @@ export const CampaignDetailsModal: React.FC<CampaignDetailsModalProps> = ({
               <Send size={15} />
               <span>Review & Launch</span>
             </button>
+          )}
+
+          {isReviewer && activeCampaign.approvalStatus === "PENDING" && (
+            <>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  setApprovalNotesInput("");
+                  setShowApproveModal(true);
+                }}
+                id="details-approve-btn"
+                style={{ background: "linear-gradient(135deg, #059669, #047857)" }}
+                aria-label="Approve Campaign"
+              >
+                <Check size={15} />
+                <span>Approve Campaign</span>
+              </button>
+
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setRejectionReasonInput("");
+                  setShowRejectModal(true);
+                }}
+                id="details-reject-btn"
+                style={{
+                  borderColor: "rgba(244, 63, 94, 0.4)",
+                  color: "#fb7185",
+                }}
+                aria-label="Reject Campaign"
+              >
+                <Ban size={15} />
+                <span>Reject Campaign</span>
+              </button>
+            </>
           )}
 
           {(activeCampaign.status === "QUEUED" || activeCampaign.status === "SENDING") && onRetryQueue && (
@@ -738,6 +935,119 @@ export const CampaignDetailsModal: React.FC<CampaignDetailsModalProps> = ({
             Close
           </button>
         </div>
+
+        {showApproveModal && (
+          <div
+            className="modal-backdrop"
+            style={{ zIndex: 1100, background: "rgba(0,0,0,0.7)" }}
+            onClick={() => !isSubmittingReview && setShowApproveModal(false)}
+          >
+            <div
+              className="modal-card"
+              style={{ maxWidth: "440px", padding: "1.5rem" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h4 style={{ margin: "0 0 0.5rem 0", fontSize: "1.1rem", color: "#f4f4f5" }}>
+                Approve Scheduled Campaign
+              </h4>
+              <p style={{ fontSize: "0.85rem", color: "#a1a1aa", margin: "0 0 1rem 0" }}>
+                Approving will confirm scheduled dispatch for{" "}
+                <strong style={{ color: "#38bdf8" }}>{formatInBusinessTimezone(activeCampaign.scheduledAt)}</strong>.
+              </p>
+              <div style={{ marginBottom: "1rem" }}>
+                <label style={{ display: "block", fontSize: "0.75rem", color: "#a1a1aa", marginBottom: "0.35rem" }}>
+                  Approval Notes (Optional)
+                </label>
+                <input
+                  type="text"
+                  className="search-input"
+                  style={{ width: "100%" }}
+                  placeholder="e.g. Schedule verified for promo"
+                  value={approvalNotesInput}
+                  onChange={(e) => setApprovalNotesInput(e.target.value)}
+                  disabled={isSubmittingReview}
+                />
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setShowApproveModal(false)}
+                  disabled={isSubmittingReview}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleApprove}
+                  disabled={isSubmittingReview}
+                  style={{ background: "linear-gradient(135deg, #059669, #047857)" }}
+                  id="confirm-approve-campaign-btn"
+                >
+                  {isSubmittingReview ? <Loader2 size={14} className="spinning" /> : <Check size={14} />}
+                  <span>{isSubmittingReview ? "Approving..." : "Confirm Approval"}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showRejectModal && (
+          <div
+            className="modal-backdrop"
+            style={{ zIndex: 1100, background: "rgba(0,0,0,0.7)" }}
+            onClick={() => !isSubmittingReview && setShowRejectModal(false)}
+          >
+            <div
+              className="modal-card"
+              style={{ maxWidth: "440px", padding: "1.5rem" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h4 style={{ margin: "0 0 0.5rem 0", fontSize: "1.1rem", color: "#f4f4f5" }}>
+                Reject Scheduled Campaign
+              </h4>
+              <p style={{ fontSize: "0.85rem", color: "#a1a1aa", margin: "0 0 1rem 0" }}>
+                Please specify why this campaign is being rejected. The customer will be able to edit the schedule or content in-place and resubmit.
+              </p>
+              <div style={{ marginBottom: "1rem" }}>
+                <label style={{ display: "block", fontSize: "0.75rem", color: "#a1a1aa", marginBottom: "0.35rem" }}>
+                  Rejection Reason <span style={{ color: "#f87171" }}>*</span>
+                </label>
+                <textarea
+                  className="search-input"
+                  style={{ width: "100%", minHeight: "80px", resize: "vertical" }}
+                  placeholder="e.g. Scheduled time falls outside approved marketing hours. Please choose a weekday morning."
+                  value={rejectionReasonInput}
+                  onChange={(e) => setRejectionReasonInput(e.target.value)}
+                  disabled={isSubmittingReview}
+                  rows={3}
+                />
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setShowRejectModal(false)}
+                  disabled={isSubmittingReview}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={handleReject}
+                  disabled={isSubmittingReview || rejectionReasonInput.trim().length < 3}
+                  style={{ background: "linear-gradient(135deg, #e11d48, #be123c)" }}
+                  id="confirm-reject-campaign-btn"
+                >
+                  {isSubmittingReview ? <Loader2 size={14} className="spinning" /> : <Ban size={14} />}
+                  <span>{isSubmittingReview ? "Rejecting..." : "Confirm Rejection"}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

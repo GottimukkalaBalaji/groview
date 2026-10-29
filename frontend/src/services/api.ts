@@ -9,6 +9,8 @@ import {
   CampaignQueueRecoverySummary,
   CampaignMessagesResponse,
   SchedulerStatusResponse,
+  ApproveCampaignPayload,
+  RejectCampaignPayload,
 } from "../types/campaign.js";
 import { AuthResponse, SignupPayload, LoginPayload } from "../types/auth.js";
 import {
@@ -32,6 +34,8 @@ import {
   RevokeBusinessAssignmentPayload,
   EligibleDelegatedAdmin,
   AssignedOrganizationSummary,
+  DelegatedAdminItem,
+  CreateDelegatedAdminPayload,
 } from "../types/platform.js";
 import {
   AnalyticsOverview,
@@ -76,13 +80,37 @@ export function sanitizeErrorMessage(message: string): string {
     .replace(/postgresql:\/\/[^@]+@/g, "postgresql://***:***@");
 }
 
-// Retrieve configured API Base URL from environment, or default to http://localhost:5000/api/v1
-const API_BASE_URL =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "") ||
-  "http://localhost:5000/api/v1";
+/**
+ * Resolves the API base URL based on environment and browser context.
+ * For local development, defaults to configured VITE_API_BASE_URL or http://localhost:5000/api/v1.
+ * When accessed over HTTPS or on external hostnames (e.g. ngrok tunnel, LAN IP) where an insecure
+ * localhost endpoint would be blocked as Mixed Content or unreachable, it falls back to relative '/api/v1'
+ * to route through the dev-server / reverse proxy.
+ */
+export function resolveApiBaseUrl(): string {
+  const envUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "");
+
+  if (typeof window !== "undefined" && window.location) {
+    const isHttps = window.location.protocol === "https:";
+    const isNonLocalhost =
+      window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1";
+
+    if (
+      (isHttps || isNonLocalhost) &&
+      (!envUrl || envUrl.startsWith("http://localhost") || envUrl.startsWith("http://127.0.0.1"))
+    ) {
+      return "/api/v1";
+    }
+  }
+
+  return envUrl || "http://localhost:5000/api/v1";
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
 
 export class ApiClient {
   private baseUrl: string;
+  private scopedOrganizationId: string | null = null;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl;
@@ -92,13 +120,25 @@ export class ApiClient {
     return this.baseUrl;
   }
 
+  public setScopedOrganizationId(orgId: string | null): void {
+    this.scopedOrganizationId = orgId ? orgId.trim() : null;
+  }
+
+  public getScopedOrganizationId(): string | null {
+    return this.scopedOrganizationId;
+  }
+
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const url = `${this.baseUrl}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
 
-    const defaultHeaders: HeadersInit = {
+    const defaultHeaders: Record<string, string> = {
       "Content-Type": "application/json",
       Accept: "application/json",
     };
+
+    if (this.scopedOrganizationId) {
+      defaultHeaders["x-scoped-organization-id"] = this.scopedOrganizationId;
+    }
 
     const config: RequestInit = {
       credentials: "include",
@@ -304,6 +344,34 @@ export class ApiClient {
   ): Promise<ApiResponse<Campaign>> {
     return this.request<ApiResponse<Campaign>>(`/campaigns/${id}/cancel`, {
       method: "POST",
+    });
+  }
+
+  /**
+   * Approves a scheduled campaign for dispatch (Delegated Admin / Master Admin)
+   */
+  public async approveCampaign(
+    id: string,
+    notes?: string
+  ): Promise<ApiResponse<Campaign>> {
+    const payload: ApproveCampaignPayload = { notes };
+    return this.request<ApiResponse<Campaign>>(`/campaigns/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * Rejects a scheduled campaign with a required reason (Delegated Admin / Master Admin)
+   */
+  public async rejectCampaign(
+    id: string,
+    reason: string
+  ): Promise<ApiResponse<Campaign>> {
+    const payload: RejectCampaignPayload = { reason };
+    return this.request<ApiResponse<Campaign>>(`/campaigns/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
   }
 
@@ -813,6 +881,30 @@ export class ApiClient {
   public async getMyAssignedOrganizations(): Promise<ApiResponse<AssignedOrganizationSummary[]>> {
     return this.request<ApiResponse<AssignedOrganizationSummary[]>>(
       "/admin/platform/assignments/my-assigned-organizations"
+    );
+  }
+
+  /**
+   * Fetches all delegated administrators for the Master Admin Admins tab.
+   */
+  public async getDelegatedAdmins(): Promise<ApiResponse<DelegatedAdminItem[]>> {
+    return this.request<ApiResponse<DelegatedAdminItem[]>>(
+      "/admin/platform/admins"
+    );
+  }
+
+  /**
+   * Creates a new delegated administrator with chosen credentials.
+   */
+  public async createDelegatedAdmin(
+    payload: CreateDelegatedAdminPayload
+  ): Promise<ApiResponse<DelegatedAdminItem>> {
+    return this.request<ApiResponse<DelegatedAdminItem>>(
+      "/admin/platform/admins",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }
     );
   }
 

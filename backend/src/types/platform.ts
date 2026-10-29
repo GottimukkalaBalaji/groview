@@ -182,3 +182,16 @@ export interface AssignedOrganizationSummary {
   slug: string;
 }
 
+export interface DelegatedAdminSummary {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string | null;
+  platformRole: PlatformRole;
+  organizationId: string;
+  organizationName?: string;
+  activeAssignmentsCount: number;
+  assignedOrganizations?: Array<{ id: string; name: string }>;
+  createdAt: Date | string;
+}
+

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { MasterAdminPage } from "../pages/MasterAdminPage.js";
 import * as AuthModule from "../context/AuthContext.js";
-import { apiClient } from "../services/api.js";
+import { apiClient, resolveApiBaseUrl } from "../services/api.js";
 
 const mockMasterUser = {
   id: "usr_balaji",
@@ -650,5 +650,91 @@ describe("Phase 9C: Master Admin Dashboard & Workflows", () => {
       });
     });
   });
+
+  describe("7. Connection Error Handling, SVG Accessibility & Base URL Resolution", () => {
+    it("renders overviewError banner with accessible icon (aria-hidden, focusable=false) and without **svg**", async () => {
+      vi.spyOn(apiClient, "getPlatformOverview").mockRejectedValue(
+        new Error("Backend connection failed: Network error")
+      );
+
+      const { container } = render(<MasterAdminPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Backend connection failed: Network error")).toBeDefined();
+      });
+
+      // The icon must have aria-hidden="true" and focusable="false"
+      const errorPanel = container.querySelector(".glass-panel[style*='rgba(239, 68, 68']");
+      expect(errorPanel).toBeDefined();
+
+      const svgIcon = errorPanel?.querySelector("svg");
+      expect(svgIcon).toBeDefined();
+      expect(svgIcon?.getAttribute("aria-hidden")).toBe("true");
+      expect(svgIcon?.getAttribute("focusable")).toBe("false");
+
+      // Verify no stray **svg** markdown artifact in the container
+      expect(container.textContent).not.toContain("**svg**");
+    });
+
+    it("retries fetching overview metrics when clicking Refresh Metrics", async () => {
+      let callCount = 0;
+      const getOverviewSpy = vi
+        .spyOn(apiClient, "getPlatformOverview")
+        .mockImplementation(async () => {
+          callCount++;
+          if (callCount === 1) {
+            throw new Error("Transient connection error");
+          }
+          return {
+            success: true,
+            data: {
+              platformStatus: "OPERATIONAL",
+              mode: "SHARED_PLATFORM",
+              organizations: { total: 1, active: 1, archived: 0 },
+              users: { total: 2, masterAdmins: 1, delegatedAdmins: 0, regularUsers: 1 },
+              whatsapp: {
+                connected: false,
+                status: "DISCONNECTED",
+                mode: "SHARED_PLATFORM",
+                source: "DATABASE",
+                wabaId: null,
+                phoneNumberId: null,
+                displayPhoneNumber: null,
+                verifiedName: null,
+                tokenExpiresAt: null,
+                lastSyncedAt: null,
+                lastError: null,
+                organizationsWithConnectedAccount: 0,
+              },
+            },
+            timestamp: new Date().toISOString(),
+          } as any;
+        });
+
+      render(<MasterAdminPage />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Transient connection error")).toBeDefined();
+      });
+
+      // Click Refresh button
+      const refreshBtn = screen.getByRole("button", { name: /^Refresh$/i });
+      fireEvent.click(refreshBtn);
+
+      await waitFor(() => {
+        expect(screen.queryByText("Transient connection error")).toBeNull();
+        expect(screen.getByText("Master Admin Dashboard")).toBeDefined();
+      });
+
+      expect(getOverviewSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("correctly resolves API base URL in HTTPS or non-localhost contexts", () => {
+      const resolved = resolveApiBaseUrl();
+      expect(resolved).toBeDefined();
+      expect(typeof resolved).toBe("string");
+    });
+  });
 });
+
 

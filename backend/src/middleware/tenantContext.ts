@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import { authService, SanitizedUser } from "../services/auth.service.js";
 import { platformAuthService } from "../services/platformAuth.service.js";
-import { UnauthorizedError } from "../utils/errors.js";
+import { getPrismaClient } from "../config/prisma.js";
+import { UnauthorizedError, ForbiddenError } from "../utils/errors.js";
 
 export const SESSION_COOKIE_NAME = "grovastra_session";
 
@@ -53,6 +54,8 @@ export const SESSION_COOKIE_OPTIONS = {
  * Authentication and Tenant Context Middleware.
  * Enforces authenticated server-side organization context on all protected endpoints.
  * Never trusts client-supplied organizationId.
+ * For DELEGATED_ADMIN users: requires explicit x-scoped-organization-id header, verified
+ * against trusted active database assignments via platformAuthService.assertOrganizationAccess.
  */
 export async function tenantContextMiddleware(
   req: Request,
@@ -60,7 +63,7 @@ export async function tenantContextMiddleware(
   next: NextFunction
 ): Promise<void> {
   try {
-    // 1. Strip any client-side injection of organizationId
+    // 1. Strip any client-side injection of organizationId in body or query
     stripInjectedOrgId(req);
 
     // 2. Extract session token from HttpOnly cookie or Authorization Bearer header
@@ -74,17 +77,82 @@ export async function tenantContextMiddleware(
         if (Boolean(session.organization.isArchived) || Boolean(session.organization.deletedAt)) {
           throw new UnauthorizedError("Organization is archived or suspended");
         }
+
         let assignedOrganizationIds: string[] | undefined = undefined;
+        let activeOrgId = session.organizationId;
+        let activeOrgName = session.organization.name;
+        let activeOrgSlug = session.organization.slug;
+
+        // Delegated Admin Scoping: Requires explicit validated x-scoped-organization-id header
         if (session.user.platformRole === "DELEGATED_ADMIN") {
           assignedOrganizationIds = await platformAuthService.resolveAssignedOrganizationIds(
             session.userId
           );
+
+          const rawScopedOrgHeader = req.headers["x-scoped-organization-id"];
+          const requestedOrgId =
+            typeof rawScopedOrgHeader === "string" ? rawScopedOrgHeader.trim() : null;
+
+          if (!requestedOrgId) {
+            throw new ForbiddenError(
+              "No target business selected. Delegated administrators must specify an assigned customer organization via x-scoped-organization-id."
+            );
+          }
+
+          // Temporarily populate req.context so assertOrganizationAccess can evaluate platform principal
+          req.context = {
+            organizationId: session.organizationId,
+            organizationName: session.organization.name,
+            organizationSlug: session.organization.slug,
+            userId: session.userId,
+            user: authService.sanitizeUser(session.user),
+            sessionId: session.id,
+            isDevScaffold: false,
+            assignedOrganizationIds,
+          };
+
+          // Verify that this requested organization is actively assigned to the delegated administrator
+          platformAuthService.assertOrganizationAccess(req, requestedOrgId);
+
+          // Retrieve active customer organization details from database
+          const prisma = getPrismaClient();
+          const targetOrg = await prisma.organization.findUnique({
+            where: { id: requestedOrgId },
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              isArchived: true,
+              deletedAt: true,
+              users: {
+                select: {
+                  platformRole: true,
+                },
+              },
+            },
+          });
+
+          if (!targetOrg || Boolean(targetOrg.isArchived) || Boolean(targetOrg.deletedAt)) {
+            throw new ForbiddenError(
+              "Access denied: Target organization is inactive, archived, or not found."
+            );
+          }
+
+          if (targetOrg.users && targetOrg.users.some((u) => u.platformRole === "DELEGATED_ADMIN")) {
+            throw new ForbiddenError(
+              "Access denied: Internal agency containers cannot be operated as customer businesses."
+            );
+          }
+
+          activeOrgId = targetOrg.id;
+          activeOrgName = targetOrg.name;
+          activeOrgSlug = targetOrg.slug;
         }
 
         req.context = {
-          organizationId: session.organizationId,
-          organizationName: session.organization.name,
-          organizationSlug: session.organization.slug,
+          organizationId: activeOrgId,
+          organizationName: activeOrgName,
+          organizationSlug: activeOrgSlug,
           userId: session.userId,
           user: authService.sanitizeUser(session.user),
           sessionId: session.id,
@@ -154,7 +222,10 @@ export async function optionalTenantContextMiddleware(
   next: NextFunction
 ): Promise<void> {
   try {
-    stripInjectedOrgId(req);
+    // Note: Do NOT call stripInjectedOrgId(req) here. optionalTenantContextMiddleware is used
+    // exclusively on platform administrative routes (/admin/platform/*) where Master Admins
+    // legitimately provide target organizationId in request bodies (e.g. creating business assignments).
+    // Customer tenant routes remain strictly protected via tenantContextMiddleware.
 
     const token =
       req.cookies?.[SESSION_COOKIE_NAME] ||

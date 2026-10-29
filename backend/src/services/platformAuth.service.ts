@@ -234,6 +234,37 @@ export class PlatformAuthService {
   }
 
   /**
+   * Express helper checking whether principal has administrative authority to approve or reject campaigns.
+   * - Master Admin: Can approve/reject across any organization.
+   * - Delegated Admin: Can approve/reject ONLY if the targetOrganizationId is in their active assignedOrganizationIds.
+   * - Customer OWNER / ADMIN / MEMBER: Denied (HTTP 403 Forbidden). Customers cannot approve their own campaigns.
+   */
+  public assertCampaignApprovalPrivilege(
+    req: Request,
+    targetOrganizationId: string
+  ): void {
+    const principal = this.getPlatformPrincipal(req);
+
+    if (principal.platformRole === "PLATFORM_MASTER_ADMIN") {
+      return; // Global master override permitted
+    }
+
+    if (principal.platformRole === "DELEGATED_ADMIN") {
+      if (!principal.assignedOrganizationIds.includes(targetOrganizationId)) {
+        throw new ForbiddenError(
+          "Access denied: You are not assigned to manage this customer organization."
+        );
+      }
+      return; // Authorized assigned delegated admin
+    }
+
+    // Customer OWNER, ADMIN, MEMBER, or unauthenticated
+    throw new ForbiddenError(
+      "Unauthorized: Campaign approval and rejection requires Delegated Administrator authorization."
+    );
+  }
+
+  /**
    * Asynchronously resolves platform principal, populating assignedOrganizationIds
    * from database if caller is DELEGATED_ADMIN and assignments haven't been resolved yet.
    */

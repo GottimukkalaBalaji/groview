@@ -28,6 +28,7 @@ interface TemplateListProps {
   loadError?: string | null;
   onRetry?: () => void;
   canCreateTemplate?: boolean;
+  isSuperAdmin?: boolean;
   onCreateNew?: () => void;
   onDuplicate?: (template: WhatsAppTemplate) => void;
   onEditDraft?: (template: WhatsAppTemplate) => void;
@@ -44,6 +45,7 @@ export const TemplateList: React.FC<TemplateListProps> = ({
   loadError = null,
   onRetry,
   canCreateTemplate = false,
+  isSuperAdmin = false,
   onCreateNew,
   onEditDraft,
   onDeleteDraft,
@@ -64,7 +66,9 @@ export const TemplateList: React.FC<TemplateListProps> = ({
     const matchesCategory = selectedCategory === "ALL" || tpl.category === selectedCategory;
     const matchesStatus =
       selectedStatus === "ALL" ||
-      (selectedStatus === "SENDABLE"
+      (selectedStatus === "FEATURED"
+        ? tpl.isLocalDraft || tpl.status === "LOCAL_DRAFT"
+        : selectedStatus === "SENDABLE"
         ? tpl.status === "APPROVED" && tpl.isSendable !== false
         : selectedStatus === "LOCAL_DRAFT"
         ? tpl.status === "LOCAL_DRAFT" || tpl.isLocalDraft
@@ -77,11 +81,12 @@ export const TemplateList: React.FC<TemplateListProps> = ({
       return (
         <div style={{ display: "flex", gap: "0.35rem", alignItems: "center", flexWrap: "wrap" }}>
           <span
-            className="status-pill status-local-draft"
+            className="status-pill status-featured"
+            data-testid="status-featured-pill"
             style={{
-              background: "rgba(99, 102, 241, 0.12)",
+              background: "rgba(99, 102, 241, 0.15)",
               color: "var(--accent-indigo-light)",
-              border: "1px solid rgba(99, 102, 241, 0.3)",
+              border: "1px solid rgba(99, 102, 241, 0.35)",
               fontWeight: 600,
               fontSize: "0.74rem",
               padding: "0.2rem 0.5rem",
@@ -91,8 +96,11 @@ export const TemplateList: React.FC<TemplateListProps> = ({
               gap: "0.3rem",
             }}
           >
-            <FileText size={12} />
-            <span>Local Draft</span>
+            <Sparkles size={12} />
+            <span>Featured · Pending Meta Approval</span>
+          </span>
+          <span className="status-pill status-draft">
+            Local Draft
           </span>
           <span
             className="status-sub-pill"
@@ -106,6 +114,19 @@ export const TemplateList: React.FC<TemplateListProps> = ({
             }}
           >
             Pending Meta Submission
+          </span>
+          <span
+            className="status-sub-pill"
+            style={{
+              background: "rgba(245, 158, 11, 0.15)",
+              color: "var(--accent-amber)",
+              fontWeight: 600,
+              fontSize: "0.68rem",
+              padding: "0.15rem 0.45rem",
+              borderRadius: "var(--radius-full)",
+            }}
+          >
+            Non-Sendable
           </span>
         </div>
       );
@@ -288,8 +309,8 @@ export const TemplateList: React.FC<TemplateListProps> = ({
               {visibleTemplates.filter((t) => t.status === "APPROVED" && isAllowedTestTemplate(t.name)).length === 1 ? "" : "s"} ready for broadcast.
               {visibleTemplates.filter((t) => t.isLocalDraft || t.status === "LOCAL_DRAFT").length > 0 && (
                 <span style={{ color: "var(--accent-indigo-light)", marginLeft: "0.35rem" }}>
-                  ({visibleTemplates.filter((t) => t.isLocalDraft || t.status === "LOCAL_DRAFT").length} local draft
-                  {visibleTemplates.filter((t) => t.isLocalDraft || t.status === "LOCAL_DRAFT").length === 1 ? "" : "s"} pending Meta)
+                  ({visibleTemplates.filter((t) => t.isLocalDraft || t.status === "LOCAL_DRAFT").length} Featured template
+                  {visibleTemplates.filter((t) => t.isLocalDraft || t.status === "LOCAL_DRAFT").length === 1 ? "" : "s"} pending Meta approval)
                 </span>
               )}
             </span>
@@ -362,6 +383,7 @@ export const TemplateList: React.FC<TemplateListProps> = ({
               aria-label="Filter by status"
             >
               <option value="ALL">All Statuses</option>
+              <option value="FEATURED">Featured Templates (Admin Saved)</option>
               <option value="LOCAL_DRAFT">Local Drafts (Pending Meta)</option>
               <option value="SENDABLE">Approved & Sendable</option>
               <option value="APPROVED">Approved on Meta</option>
@@ -494,7 +516,23 @@ export const TemplateList: React.FC<TemplateListProps> = ({
                 {/* WhatsApp Message Preview Bubble inside Card */}
                 <div className="template-card-preview-area" data-testid={`template-card-preview-${template.id}`}>
                   <div className="wa-card-canvas">
-                    <WhatsAppMessageBubble template={template} compact showSampleValues={true} />
+                    <WhatsAppMessageBubble
+                      template={
+                        !isSuperAdmin && template.header?.type === "IMAGE" && template.header?.mediaUrl
+                          ? {
+                              ...template,
+                              header: {
+                                ...template.header,
+                                mediaUrl: undefined,
+                                mediaFilename: undefined,
+                              },
+                            }
+                          : template
+                      }
+                      compact
+                      showSampleValues={true}
+                      hideSampleMedia={!isSuperAdmin}
+                    />
                   </div>
                 </div>
 
@@ -525,11 +563,12 @@ export const TemplateList: React.FC<TemplateListProps> = ({
                       type="button"
                       className="btn-card-action btn-action-edit"
                       onClick={() => onSelectTemplate(template)}
-                      title="Inspect Template & Live Phone Preview"
+                      title="Test preview template appearance in simulated WhatsApp device"
                       aria-label={`${isLocal ? "Preview" : "View"} ${template.name}`}
+                      data-testid={`btn-test-preview-${template.id}`}
                     >
                       <Eye size={14} />
-                      <span>{isLocal ? "Preview" : "View & Preview"}</span>
+                      <span>{isLocal ? "Test Preview" : "View & Preview"}</span>
                     </button>
                     {isLocal && onDeleteDraft && (
                       <button

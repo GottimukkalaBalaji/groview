@@ -8,6 +8,7 @@ import {
   Settings,
   Sparkles,
   ShieldAlert,
+  Palette,
   X,
 } from "lucide-react";
 
@@ -29,6 +30,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const navItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "templates", label: "Templates", icon: FileText },
+    { id: "poster-editor", label: "Poster Studio", icon: Palette, badge: "New" },
     { id: "campaigns", label: "Campaigns", icon: Send },
     { id: "contacts", label: "Audiences", icon: Users },
     { id: "analytics", label: "Analytics", icon: BarChart3 },

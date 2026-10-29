@@ -4,11 +4,14 @@ import { sendSuccess } from "../utils/response.js";
 import { DEFAULT_ORGANIZATION_ID } from "../middleware/tenantContext.js";
 import { UnauthorizedError } from "../utils/errors.js";
 import { campaignSchedulerService } from "../services/campaignScheduler.service.js";
+import { platformAuthService } from "../services/platformAuth.service.js";
 import {
   CreateCampaignInput,
   UpdateCampaignInput,
   QueryCampaignsInput,
   ScheduleCampaignInput,
+  ApproveCampaignInput,
+  RejectCampaignInput,
 } from "../validators/campaign.validator.js";
 
 export class CampaignController {
@@ -184,6 +187,42 @@ export class CampaignController {
       const { scheduledAt } = req.body as ScheduleCampaignInput;
       const scheduled = await campaignService.scheduleCampaign(orgId, id, scheduledAt);
       sendSuccess(res, scheduled, 200, "Campaign scheduled successfully");
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public approve = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const orgId = this.getOrganizationId(req);
+      platformAuthService.assertCampaignApprovalPrivilege(req, orgId);
+      const { id } = req.params;
+      const userId = this.getUserId(req);
+      const { notes } = (req.body || {}) as ApproveCampaignInput;
+      const approved = await campaignService.approveCampaign(orgId, id, userId, notes);
+      sendSuccess(res, approved, 200, "Campaign approved successfully");
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  public reject = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      const orgId = this.getOrganizationId(req);
+      platformAuthService.assertCampaignApprovalPrivilege(req, orgId);
+      const { id } = req.params;
+      const userId = this.getUserId(req);
+      const { reason } = req.body as RejectCampaignInput;
+      const rejected = await campaignService.rejectCampaign(orgId, id, userId, reason);
+      sendSuccess(res, rejected, 200, "Campaign rejected successfully");
     } catch (error) {
       next(error);
     }

@@ -18,6 +18,7 @@ import {
   CampaignQueueRecoverySummary,
   SchedulerStatusResponse,
 } from "../types/campaign.js";
+import { PosterCampaignAttachment } from "../types/poster.js";
 
 interface ToastNotification {
   id: string;
@@ -25,8 +26,33 @@ interface ToastNotification {
   type: "success" | "error";
 }
 
-export const CampaignsPage: React.FC = () => {
-  const [viewMode, setViewMode] = useState<"LIST" | "WIZARD">("LIST");
+export interface CampaignsPageProps {
+  initialPosterAttachment?: PosterCampaignAttachment | null;
+  onClearPosterAttachment?: () => void;
+  currentUser?: any;
+  userId?: string | null;
+}
+
+export const CampaignsPage: React.FC<CampaignsPageProps> = ({
+  initialPosterAttachment,
+  onClearPosterAttachment,
+  currentUser,
+  userId,
+}) => {
+  const [viewMode, setViewMode] = useState<"LIST" | "WIZARD">(() =>
+    initialPosterAttachment ? "WIZARD" : "LIST"
+  );
+  const [posterAttachment, setPosterAttachment] = useState<PosterCampaignAttachment | null>(
+    initialPosterAttachment || null
+  );
+
+  useEffect(() => {
+    if (initialPosterAttachment) {
+      setPosterAttachment(initialPosterAttachment);
+      setViewMode("WIZARD");
+    }
+  }, [initialPosterAttachment]);
+
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
 
   // Campaign list state
@@ -177,6 +203,8 @@ export const CampaignsPage: React.FC = () => {
 
   const handleCancelWizard = () => {
     setEditingCampaign(null);
+    setPosterAttachment(null);
+    onClearPosterAttachment?.();
     setViewMode("LIST");
   };
 
@@ -190,6 +218,8 @@ export const CampaignsPage: React.FC = () => {
         const res = await apiClient.updateCampaign(editingCampaign.id, payload as UpdateCampaignPayload);
         if (res.success) {
           showToast(`Campaign "${res.data.name}" updated successfully.`);
+          setPosterAttachment(null);
+          onClearPosterAttachment?.();
           setViewMode("LIST");
           setEditingCampaign(null);
           await fetchCampaigns();
@@ -198,6 +228,8 @@ export const CampaignsPage: React.FC = () => {
         const res = await apiClient.createCampaign(payload as CreateCampaignPayload);
         if (res.success) {
           showToast(`Campaign draft "${res.data.name}" created successfully.`);
+          setPosterAttachment(null);
+          onClearPosterAttachment?.();
           setViewMode("LIST");
           setEditingCampaign(null);
           await fetchCampaigns();
@@ -484,6 +516,12 @@ export const CampaignsPage: React.FC = () => {
       ) : (
         <CampaignWizard
           initialCampaign={editingCampaign}
+          posterAttachment={posterAttachment}
+          userId={userId || currentUser?.id}
+          onRemovePosterAttachment={() => {
+            setPosterAttachment(null);
+            onClearPosterAttachment?.();
+          }}
           onSave={handleSaveWizard}
           onCancel={handleCancelWizard}
           isSaving={isSaving}

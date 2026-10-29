@@ -18,10 +18,14 @@ import {
   Send,
   CheckCircle,
   Loader2,
+  Sparkles,
 } from "lucide-react";
 import { WhatsAppTemplate, TemplateCategory, SubmitTemplatePayload, SubmittedTemplateResponse } from "../types/template.js";
 import { apiClient } from "../services/api.js";
 import { WhatsAppPhonePreview } from "./WhatsAppPhonePreview.js";
+import { CampaignPosterPickerModal } from "./poster/CampaignPosterPickerModal.js";
+import { PosterCampaignAttachment } from "../types/poster.js";
+import { useAuth } from "../context/AuthContext.js";
 import {
   TemplateStudioType,
   TEMPLATE_TYPE_OPTIONS,
@@ -128,7 +132,41 @@ const DEFAULT_DRAFT: DraftState = {
   actionGuidance: "",
 };
 
+export const LEGACY_DRAFTS_STORAGE_KEY = "grovastra_local_template_drafts_v1";
 export const DRAFTS_STORAGE_KEY = "grovastra_local_template_drafts_v1";
+
+/**
+ * Returns tenant/organization-scoped template draft storage key.
+ * If organizationId is missing or empty, safely falls back to legacy key.
+ */
+export function getTemplateDraftsStorageKey(organizationId?: string | null): string {
+  if (organizationId && organizationId.trim()) {
+    return `grovastra_template_drafts_${organizationId.trim()}`;
+  }
+  return LEGACY_DRAFTS_STORAGE_KEY;
+}
+
+/**
+ * Safely loads template drafts with backward-compatible read and migration from legacy key.
+ */
+export function loadTemplateDraftsRaw(organizationId?: string | null): string | null {
+  const scopedKey = getTemplateDraftsStorageKey(organizationId);
+  try {
+    const scopedData = localStorage.getItem(scopedKey);
+    if (scopedData) return scopedData;
+    const legacyData = localStorage.getItem(LEGACY_DRAFTS_STORAGE_KEY);
+    if (legacyData && organizationId && organizationId.trim()) {
+      try {
+        localStorage.setItem(scopedKey, legacyData);
+      } catch {
+        // Storage write error ignored
+      }
+    }
+    return legacyData;
+  } catch {
+    return null;
+  }
+}
 
 export function templateToDraft(t?: WhatsAppTemplate | null): DraftState | null {
   if (!t) return null;
@@ -290,7 +328,7 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
       if (fromInitial) return fromInitial;
     }
     try {
-      const saved = localStorage.getItem(DRAFTS_STORAGE_KEY);
+      const saved = loadTemplateDraftsRaw();
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -305,10 +343,12 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
     return DEFAULT_DRAFT;
   });
 
+  const { user, organization } = useAuth();
   const [mobileTab, setMobileTab] = useState<"DETAILS" | "PREVIEW">("DETAILS");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [showDiscardModal, setShowDiscardModal] = useState<boolean>(false);
+  const [isPosterPickerOpen, setIsPosterPickerOpen] = useState<boolean>(false);
 
   // Template Type Dropdown state
   const [selectedType, setSelectedType] = useState<TemplateStudioType>("STANDARD");
@@ -630,6 +670,26 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
     }));
   };
 
+  const handlePosterSelect = (attachment: PosterCampaignAttachment) => {
+    if (activeObjectURLRef.current) {
+      URL.revokeObjectURL(activeObjectURLRef.current);
+      activeObjectURLRef.current = null;
+    }
+    setDraft((prev) => ({
+      ...prev,
+      headerMediaUrl: attachment.dataUrl,
+      headerMediaFilename: `${attachment.title}.png`,
+      headerMediaFilesize: `${attachment.width}×${attachment.height} px (Poster Studio)`,
+      headerMediaMimeType: "image/png",
+      headerMediaSource: "FILE",
+    }));
+    setErrors((prev) => {
+      const next = { ...prev };
+      delete next.headerMedia;
+      return next;
+    });
+  };
+
   const handleHeaderTypeChange = (newType: DraftState["headerType"]) => {
     if (newType === draft.headerType) return;
     if (activeObjectURLRef.current) {
@@ -869,7 +929,8 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
     }
 
     try {
-      const existingRaw = localStorage.getItem(DRAFTS_STORAGE_KEY);
+      const storageKey = getTemplateDraftsStorageKey(organization?.id);
+      const existingRaw = loadTemplateDraftsRaw(organization?.id);
       let list: any[] = [];
       if (existingRaw) {
         try {
@@ -900,7 +961,10 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
         },
         ...filteredList,
       ];
-      localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(updatedList));
+      localStorage.setItem(storageKey, JSON.stringify(updatedList));
+      if (storageKey !== LEGACY_DRAFTS_STORAGE_KEY) {
+        localStorage.setItem(LEGACY_DRAFTS_STORAGE_KEY, JSON.stringify(updatedList));
+      }
       setSavedDraftSnapshot({ ...draft });
       showToast(`Draft "${draft.name}" saved locally.`);
       onDraftSaved?.();
@@ -941,7 +1005,8 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
 
         // Also update local storage drafts with returned status and Meta ID
         try {
-          const existingRaw = localStorage.getItem(DRAFTS_STORAGE_KEY);
+          const storageKey = getTemplateDraftsStorageKey(organization?.id);
+          const existingRaw = loadTemplateDraftsRaw(organization?.id);
           let list: any[] = [];
           if (existingRaw) {
             try {
@@ -963,7 +1028,10 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
             },
             ...filtered,
           ];
-          localStorage.setItem(DRAFTS_STORAGE_KEY, JSON.stringify(updatedList));
+          localStorage.setItem(storageKey, JSON.stringify(updatedList));
+          if (storageKey !== LEGACY_DRAFTS_STORAGE_KEY) {
+            localStorage.setItem(LEGACY_DRAFTS_STORAGE_KEY, JSON.stringify(updatedList));
+          }
         } catch {
           // ignore storage error
         }
@@ -1078,6 +1146,16 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
             </div>
           </div>
         </div>
+      )}
+
+      {/* Saved Poster Picker Modal for Image Header */}
+      {isPosterPickerOpen && (
+        <CampaignPosterPickerModal
+          isOpen={isPosterPickerOpen}
+          onClose={() => setIsPosterPickerOpen(false)}
+          onSelectPoster={handlePosterSelect}
+          userId={user?.id}
+        />
       )}
 
       {/* Meta Template Submission Review & Confirmation Modal */}
@@ -1872,7 +1950,63 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
                     </div>
 
                     {/* Source Toggle: URL vs File Upload */}
-                    <div style={{ display: "flex", gap: "0.5rem" }}>
+                    {/* Source Toggle: Upload Image vs Choose from Posters vs Provide Public URL */}
+                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+                      <button
+                        type="button"
+                        className={`btn-secondary ${
+                          draft.headerMediaSource === "FILE" && !draft.headerMediaFilesize?.includes("Poster Studio")
+                            ? "active-pill-btn"
+                            : ""
+                        }`}
+                        style={{
+                          fontSize: "0.78rem",
+                          padding: "0.3rem 0.75rem",
+                          ...(draft.headerMediaSource === "FILE" && !draft.headerMediaFilesize?.includes("Poster Studio")
+                            ? {
+                                background: "rgba(99, 102, 241, 0.2)",
+                                borderColor: "var(--accent-indigo-light)",
+                                color: "var(--text-primary)",
+                              }
+                            : {}),
+                        }}
+                        onClick={() => {
+                          handleMediaSourceToggle("FILE");
+                          fileInputRef.current?.click();
+                        }}
+                        id="media-source-file-btn"
+                        data-testid="media-source-file-btn"
+                      >
+                        <Upload size={13} style={{ marginRight: "0.25rem" }} />
+                        {draft.headerType === "IMAGE" ? "Upload Image" : "Upload from Device"}
+                      </button>
+
+                      {draft.headerType === "IMAGE" && (
+                        <button
+                          type="button"
+                          className={`btn-secondary ${
+                            draft.headerMediaFilesize?.includes("Poster Studio") ? "active-pill-btn" : ""
+                          }`}
+                          style={{
+                            fontSize: "0.78rem",
+                            padding: "0.3rem 0.75rem",
+                            ...(draft.headerMediaFilesize?.includes("Poster Studio")
+                              ? {
+                                  background: "rgba(16, 185, 129, 0.2)",
+                                  borderColor: "var(--accent-emerald)",
+                                  color: "var(--text-primary)",
+                                }
+                              : {}),
+                          }}
+                          onClick={() => setIsPosterPickerOpen(true)}
+                          id="choose-from-posters-btn"
+                          data-testid="choose-from-posters-btn"
+                        >
+                          <Sparkles size={13} style={{ color: "var(--accent-emerald)", marginRight: "0.25rem" }} />
+                          Choose from Posters
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         className={`btn-secondary ${
@@ -1895,30 +2029,13 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
                       >
                         Provide Public URL
                       </button>
-                      <button
-                        type="button"
-                        className={`btn-secondary ${
-                          draft.headerMediaSource === "FILE" ? "active-pill-btn" : ""
-                        }`}
-                        style={{
-                          fontSize: "0.78rem",
-                          padding: "0.3rem 0.75rem",
-                          ...(draft.headerMediaSource === "FILE"
-                            ? {
-                                background: "rgba(99, 102, 241, 0.2)",
-                                borderColor: "var(--accent-indigo-light)",
-                                color: "var(--text-primary)",
-                              }
-                            : {}),
-                        }}
-                        onClick={() => handleMediaSourceToggle("FILE")}
-                        id="media-source-file-btn"
-                        data-testid="media-source-file-btn"
-                      >
-                        <Upload size={13} style={{ marginRight: "0.25rem" }} />
-                        Upload from Device (Local Preview)
-                      </button>
                     </div>
+
+                    {draft.headerType === "IMAGE" && (
+                      <span className="input-hint" style={{ fontSize: "0.74rem", color: "var(--text-secondary)", marginTop: "0.35rem", display: "block" }}>
+                        💡 Selected image or poster is saved with your template draft for preview. Note: Real Meta media upload is executed upon submission to Meta WhatsApp Cloud API.
+                      </span>
+                    )}
 
                     {/* URL Input Mode */}
                     {draft.headerMediaSource === "URL" && (
@@ -2051,6 +2168,18 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
                             </div>
 
                             <div style={{ display: "flex", gap: "0.4rem", flexShrink: 0 }}>
+                              {draft.headerType === "IMAGE" && (
+                                <button
+                                  type="button"
+                                  className="btn-secondary"
+                                  style={{ fontSize: "0.72rem", padding: "0.2rem 0.5rem" }}
+                                  onClick={() => setIsPosterPickerOpen(true)}
+                                  id="replace-poster-btn"
+                                  data-testid="replace-poster-btn"
+                                >
+                                  Choose Poster
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className="btn-secondary"
@@ -2059,7 +2188,7 @@ export const TemplateStudioAuthoring: React.FC<TemplateStudioAuthoringProps> = (
                                 id="replace-file-btn"
                                 data-testid="replace-file-btn"
                               >
-                                Replace
+                                Upload Image
                               </button>
                               <button
                                 type="button"

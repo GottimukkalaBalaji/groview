@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { platformAuthService } from "../services/platformAuth.service.js";
 import { platformAdminService } from "../services/platformAdmin.service.js";
 import { sendSuccess } from "../utils/response.js";
+import { CreateDelegatedAdminInput } from "../validators/admin.validator.js";
 
 export const platformAdminController = {
   /**
@@ -112,6 +113,33 @@ export const platformAdminController = {
       const forceRefresh = req.query.force === "true";
       const data = await platformAdminService.getPlatformTemplates(forceRefresh);
       sendSuccess(res, data);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/v1/admin/platform/admins
+   * Protected Master Admin endpoint: retrieves all delegated administrator accounts.
+   */
+  async getDelegatedAdmins(_req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const admins = await platformAdminService.getDelegatedAdminsList();
+      sendSuccess(res, admins);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * POST /api/v1/admin/platform/admins
+   * Protected Master Admin endpoint: creates a new delegated administrator with chosen credentials.
+   */
+  async createDelegatedAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const body = req.body as CreateDelegatedAdminInput;
+      const createdAdmin = await platformAdminService.createDelegatedAdmin(body);
+      sendSuccess(res, createdAdmin, 201, "Delegated administrator created successfully.");
     } catch (error) {
       next(error);
     }

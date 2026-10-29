@@ -17,6 +17,8 @@ export interface CampaignStatusBadgeConfig {
 
 export interface CampaignLike {
   status: string;
+  approvalStatus?: string;
+  rejectionReason?: string | null;
   scheduledAt?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
@@ -33,7 +35,32 @@ export interface CampaignLike {
  */
 export function getCustomerCampaignStatus(campaign: CampaignLike): CampaignStatusBadgeConfig {
   const status = campaign.status?.toUpperCase() || "DRAFT";
+  const approvalStatus = campaign.approvalStatus?.toUpperCase();
   const now = Date.now();
+
+  if (approvalStatus === "REJECTED") {
+    return {
+      label: "Changes Requested",
+      badgeClass: "bg-rose-500/10 text-rose-300 border-rose-500/30",
+      dotClass: "bg-rose-400",
+      isOverdue: false,
+      helperText: campaign.rejectionReason
+        ? `Reason: ${campaign.rejectionReason}`
+        : "Campaign was rejected by admin. Please edit and resubmit.",
+    };
+  }
+
+  if (approvalStatus === "PENDING") {
+    return {
+      label: "Pending Admin Approval",
+      badgeClass: "bg-amber-500/10 text-amber-300 border-amber-500/30",
+      dotClass: "bg-amber-400 animate-pulse",
+      isOverdue: false,
+      helperText: campaign.scheduledAt
+        ? `Awaiting admin approval for dispatch at ${formatInBusinessTimezone(campaign.scheduledAt)}`
+        : "Awaiting admin approval",
+    };
+  }
 
   if (status === "DELIVERY_CONFIRMATION_PENDING" || status === "SUBMITTED_UNCONFIRMED") {
     return {

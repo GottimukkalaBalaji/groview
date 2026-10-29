@@ -44,6 +44,7 @@ export interface WhatsAppTemplate {
     mediaFilesize?: string;
     mediaIsLocal?: boolean;
     mimeType?: string;
+    mediaSource?: "POSTER" | "FILE" | "URL";
   };
   body: string;
   variables: TemplateVariable[];

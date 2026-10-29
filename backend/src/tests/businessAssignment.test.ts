@@ -444,4 +444,193 @@ describe("Step 4 — Business Assignment Management & Delegated Admin Scoping", 
       expect(res.body.error.message).toMatch(/Platform administrator authorization required/i);
     });
   });
+
+  describe("5. Phase A1.4: Safe Agency Container Exclusion & Request Validation", () => {
+    it("returns structured 422 response with validation details when request body is empty or missing organizationId/userId", async () => {
+      const res = await request(app)
+        .post("/api/v1/admin/platform/assignments")
+        .set("x-platform-admin-secret", TEST_SECRET)
+        .send({});
+
+      expect(res.status).toBe(422);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe("VALIDATION_ERROR");
+      expect(res.body.error.message).toBe("Validation failed");
+      expect(Array.isArray(res.body.error.details)).toBe(true);
+
+      const fields = res.body.error.details.map((d: any) => d.field);
+      expect(fields).toContain("organizationId");
+      expect(fields).toContain("userId");
+    });
+
+    it("returns structured 422 response when organizationId is empty string", async () => {
+      const res = await request(app)
+        .post("/api/v1/admin/platform/assignments")
+        .set("x-platform-admin-secret", TEST_SECRET)
+        .send({
+          organizationId: "",
+          userId: "usr_del_123",
+        });
+
+      expect(res.status).toBe(422);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe("VALIDATION_ERROR");
+      expect(res.body.error.details.some((d: any) => d.field === "organizationId")).toBe(true);
+    });
+
+    it("preserves organizationId across Express middleware pipeline and creates assignment when valid payload is submitted", async () => {
+      const mockCreatedAssignment = {
+        id: "asgn_new_123",
+        organizationId: CUSTOMER_ORG_1,
+        organization: { id: CUSTOMER_ORG_1, name: "Customer Alpha", slug: "customer-alpha", isArchived: false },
+        userId: "usr_del_123",
+        user: { id: "usr_del_123", email: "del@agency.com", firstName: "Del", lastName: "Admin", platformRole: "DELEGATED_ADMIN" },
+        assignedById: null,
+        assignedBy: null,
+        status: "ACTIVE" as const,
+        assignedAt: new Date(),
+        revokedAt: null,
+        assignmentReason: "New account management",
+        revocationReason: null,
+        metadata: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      const createSpy = vi
+        .spyOn(businessAssignmentService, "createAssignment")
+        .mockResolvedValueOnce(mockCreatedAssignment);
+
+      const res = await request(app)
+        .post("/api/v1/admin/platform/assignments")
+        .set("x-platform-admin-secret", TEST_SECRET)
+        .send({
+          organizationId: CUSTOMER_ORG_1,
+          userId: "usr_del_123",
+          assignmentReason: "New account management",
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.id).toBe("asgn_new_123");
+      expect(res.body.data.organizationId).toBe(CUSTOMER_ORG_1);
+      expect(createSpy).toHaveBeenCalledWith({
+        organizationId: CUSTOMER_ORG_1,
+        userId: "usr_del_123",
+        assignmentReason: "New account management",
+        assignedById: null,
+      });
+    });
+
+    it("returns structured 422 response on revoke assignment with invalid body payload", async () => {
+      const res = await request(app)
+        .post("/api/v1/admin/platform/assignments/asgn_1/revoke")
+        .set("x-platform-admin-secret", TEST_SECRET)
+        .send({
+          revocationReason: "x".repeat(501),
+        });
+
+      expect(res.status).toBe(422);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe("VALIDATION_ERROR");
+      expect(res.body.error.details[0].field).toBe("revocationReason");
+    });
+
+    it("rejects assigning an internal agency container directly hosting DELEGATED_ADMIN with BadRequestError (400)", async () => {
+      const prisma = getPrismaClient();
+
+      vi.spyOn(prisma.organization, "findUnique").mockResolvedValueOnce({
+        id: "org_agency_container_1",
+        name: "Partner Agency (Agency Container)",
+        isArchived: false,
+        deletedAt: null,
+        users: [{ platformRole: "DELEGATED_ADMIN" }],
+      } as any);
+
+      await expect(
+        businessAssignmentService.createAssignment({
+          organizationId: "org_agency_container_1",
+          userId: "usr_delegated_1",
+        })
+      ).rejects.toThrowError(/Cannot assign internal agency container organization/i);
+    });
+
+    it("ensures platformAdminService.getOrganizations enforces relation-based exclusion of DELEGATED_ADMIN containers", async () => {
+      const { platformAdminService } = await import("../services/platformAdmin.service.js");
+      const prisma = getPrismaClient();
+
+      let capturedWhere: any = null;
+      vi.spyOn(prisma.organization, "findMany").mockImplementation(async (args: any) => {
+        capturedWhere = args?.where;
+        return [
+          {
+            id: CUSTOMER_ORG_1,
+            name: "Customer Alpha",
+            slug: "customer-alpha",
+            isArchived: false,
+            deletedAt: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            _count: { users: 3 },
+            metaAccount: null,
+          },
+        ] as any;
+      });
+
+      vi.spyOn(prisma.organization, "count").mockResolvedValue(1);
+
+      const result = await platformAdminService.getOrganizations({
+        status: "active",
+        search: "alpha",
+        page: 1,
+        limit: 10,
+      });
+
+      expect(result.organizations.length).toBe(1);
+      expect(result.organizations[0].name).toBe("Customer Alpha");
+
+      // Verify that relation filter users: { none: { platformRole: "DELEGATED_ADMIN" } } was included
+      expect(capturedWhere).toBeDefined();
+      expect(capturedWhere.users).toEqual({
+        none: {
+          platformRole: "DELEGATED_ADMIN",
+        },
+      });
+      expect(capturedWhere.isArchived).toBe(false);
+      expect(capturedWhere.deletedAt).toBeNull();
+      expect(capturedWhere.OR).toEqual([
+        { name: { contains: "alpha", mode: "insensitive" } },
+        { slug: { contains: "alpha", mode: "insensitive" } },
+        { id: { contains: "alpha", mode: "insensitive" } },
+      ]);
+    });
+
+    it("preserves archived organization filtering while maintaining agency container exclusion", async () => {
+      const { platformAdminService } = await import("../services/platformAdmin.service.js");
+      const prisma = getPrismaClient();
+
+      let capturedWhere: any = null;
+      vi.spyOn(prisma.organization, "findMany").mockImplementation(async (args: any) => {
+        capturedWhere = args?.where;
+        return [] as any;
+      });
+      vi.spyOn(prisma.organization, "count").mockResolvedValue(0);
+
+      await platformAdminService.getOrganizations({
+        status: "archived",
+        search: "old",
+      });
+
+      expect(capturedWhere.users).toEqual({
+        none: {
+          platformRole: "DELEGATED_ADMIN",
+        },
+      });
+      // Verify archived condition combined with search
+      expect(capturedWhere.AND).toBeDefined();
+      expect(capturedWhere.AND[0]).toEqual({
+        OR: [{ isArchived: true }, { deletedAt: { not: null } }],
+      });
+    });
+  });
 });

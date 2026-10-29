@@ -18,4 +18,16 @@ describe("GET /api/v1/health", () => {
     expect(response.body.data).toHaveProperty("timestamp");
     expect(typeof response.body.data.uptime).toBe("number");
   });
+
+  it("should permit CORS preflight OPTIONS request containing x-scoped-organization-id", async () => {
+    const response = await request(app)
+      .options("/api/v1/health")
+      .set("Origin", "http://localhost:5173")
+      .set("Access-Control-Request-Method", "GET")
+      .set("Access-Control-Request-Headers", "Content-Type,x-scoped-organization-id");
+
+    expect(response.status).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe("http://localhost:5173");
+    expect(response.headers["access-control-allow-headers"]).toContain("x-scoped-organization-id");
+  });
 });

@@ -1,6 +1,12 @@
 import { Router } from "express";
 import { businessAssignmentController } from "../controllers/businessAssignment.controller.js";
 import { platformAuthService } from "../services/platformAuth.service.js";
+import { validateRequest } from "../middleware/validateRequest.js";
+import {
+  createBusinessAssignmentSchema,
+  revokeBusinessAssignmentSchema,
+  queryBusinessAssignmentsSchema,
+} from "../validators/businessAssignment.validator.js";
 
 const businessAssignmentRouter = Router();
 
@@ -21,6 +27,7 @@ businessAssignmentRouter.get(
 businessAssignmentRouter.get(
   "/",
   platformAuthService.requireMasterAdmin,
+  validateRequest({ query: queryBusinessAssignmentsSchema }),
   businessAssignmentController.getAssignments
 );
 
@@ -28,6 +35,7 @@ businessAssignmentRouter.get(
 businessAssignmentRouter.post(
   "/",
   platformAuthService.requireMasterAdmin,
+  validateRequest({ body: createBusinessAssignmentSchema }),
   businessAssignmentController.createAssignment
 );
 
@@ -35,6 +43,7 @@ businessAssignmentRouter.post(
 businessAssignmentRouter.post(
   "/:id/revoke",
   platformAuthService.requireMasterAdmin,
+  validateRequest({ body: revokeBusinessAssignmentSchema }),
   businessAssignmentController.revokeAssignment
 );
 

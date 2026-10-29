@@ -1,6 +1,14 @@
 import { CampaignStatus, AudienceType, Prisma, ConsentStatus, MessageDeliveryStatus } from "@prisma/client";
 import { getPrismaClient } from "../config/prisma.js";
-import { NotFoundError, BadRequestError, AppError } from "../utils/errors.js";
+import { NotFoundError, BadRequestError, AppError, ForbiddenError, ConflictError } from "../utils/errors.js";
+
+export type CampaignApprovalStatus = "NOT_REQUIRED" | "PENDING" | "APPROVED" | "REJECTED";
+export const CampaignApprovalStatus = {
+  NOT_REQUIRED: "NOT_REQUIRED" as const,
+  PENDING: "PENDING" as const,
+  APPROVED: "APPROVED" as const,
+  REJECTED: "REJECTED" as const,
+};
 import { whatsappTemplateService } from "./whatsappTemplate.service.js";
 import { normalizePhoneNumber } from "../utils/phone.js";
 import {
@@ -10,6 +18,7 @@ import {
 import {
   enqueueWhatsAppDispatchJob,
   inspectAndRecoverDispatchJob,
+  removeWhatsAppDispatchJob,
 } from "../queue/whatsapp.queue.js";
 import { isRedisConfigured } from "../config/redis.js";
 import { CampaignLifecycleService } from "./campaignLifecycle.service.js";
@@ -18,8 +27,60 @@ import {
   CreateCampaignInput,
   UpdateCampaignInput,
   QueryCampaignsInput,
+  MIN_SCHEDULE_LEAD_MS,
 } from "../validators/campaign.validator.js";
+export { MIN_SCHEDULE_LEAD_MS };
+import { QueryPlatformCampaignApprovalsInput } from "../validators/campaignApproval.validator.js";
 import { isAllowedTestTemplate, getAllowedTestTemplates } from "../constants/templateAllowlist.js";
+
+export interface PlatformCampaignApprovalItem {
+  id: string;
+  organizationId: string;
+  name: string;
+  description: string | null;
+  status: CampaignStatus;
+  approvalStatus: CampaignApprovalStatus;
+  scheduledAt: Date | null;
+  totalRecipients: number;
+  templateId: string;
+  templateName: string;
+  templateCategory: string;
+  templateLanguage: string;
+  audienceType: AudienceType;
+  audienceName: string;
+  createdBy: string | null;
+  approvedAt: Date | null;
+  approvedBy: string | null;
+  approvalNotes: string | null;
+  rejectedAt: Date | null;
+  rejectedBy: string | null;
+  rejectionReason: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  organization: {
+    id: string;
+    name: string;
+    slug: string;
+  };
+}
+
+export interface PlatformCampaignApprovalsResult {
+  items: PlatformCampaignApprovalItem[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+    hasNextPage: boolean;
+    hasPrevPage: boolean;
+  };
+  counts: {
+    pending: number;
+    approved: number;
+    rejected: number;
+    total: number;
+  };
+}
 
 export interface CampaignDispatchSummary {
   campaignId: string;
@@ -405,12 +466,22 @@ export class CampaignService {
     // Convert variablesMapping to JSON
     const variablesMapping = (input.variablesMapping || {}) as Prisma.InputJsonValue;
 
+    const scheduledDate = input.scheduledAt ? new Date(input.scheduledAt) : null;
+    if (scheduledDate && scheduledDate.getTime() < Date.now() + MIN_SCHEDULE_LEAD_MS) {
+      throw new BadRequestError("Scheduled time must be a future timestamp at least 5 minutes ahead.");
+    }
+    const approvalStatus = scheduledDate
+      ? CampaignApprovalStatus.PENDING
+      : CampaignApprovalStatus.NOT_REQUIRED;
+
     const campaign = await prisma.campaign.create({
       data: {
         organizationId,
         name: input.name,
         description: input.description || null,
-        status: input.scheduledAt ? CampaignStatus.SCHEDULED : CampaignStatus.DRAFT,
+        status: CampaignStatus.DRAFT,
+        approvalStatus: approvalStatus as any,
+        dispatchRun: 1,
         templateId: input.templateId,
         templateName: input.templateName,
         templateLanguage: input.templateLanguage || "en_US",
@@ -420,7 +491,7 @@ export class CampaignService {
         audienceId: input.audienceId || null,
         audienceName: input.audienceName || "All Audience",
         totalRecipients: calculatedRecipients,
-        scheduledAt: input.scheduledAt ? new Date(input.scheduledAt) : null,
+        scheduledAt: scheduledDate,
         createdBy: userId,
       },
     });
@@ -727,6 +798,46 @@ export class CampaignService {
       }
     }
 
+    // Schedule-clear barrier:
+    // A campaign in PENDING or REJECTED cannot have scheduledAt set to null to convert to Send Now
+    const existingApproval = (existing as any).approvalStatus || CampaignApprovalStatus.NOT_REQUIRED;
+    const isPendingOrRejected =
+      existingApproval === CampaignApprovalStatus.PENDING ||
+      existingApproval === CampaignApprovalStatus.REJECTED;
+
+    if (isPendingOrRejected && input.scheduledAt === null) {
+      throw new BadRequestError(
+        "Scheduled campaigns in pending review or rejected status cannot be converted to Send Now. Please submit a valid future schedule."
+      );
+    }
+
+    // If resubmitting a rejected campaign:
+    const isResubmittingRejected = existingApproval === CampaignApprovalStatus.REJECTED;
+    if (isResubmittingRejected) {
+      const targetSchedule = input.scheduledAt !== undefined ? input.scheduledAt : (existing.scheduledAt ? existing.scheduledAt.toISOString() : null);
+      if (!targetSchedule || new Date(targetSchedule).getTime() < Date.now() + MIN_SCHEDULE_LEAD_MS) {
+        throw new BadRequestError(
+          "Resubmitting a rejected campaign requires a valid future scheduled timestamp (at least 5 minutes ahead)."
+        );
+      }
+    }
+
+    // Check for material changes on an APPROVED campaign:
+    const isCurrentlyApproved = existingApproval === CampaignApprovalStatus.APPROVED;
+    let isMaterialChange = false;
+
+    if (input.templateName !== undefined && input.templateName !== existing.templateName) isMaterialChange = true;
+    if (input.templateId !== undefined && input.templateId !== existing.templateId) isMaterialChange = true;
+    if (input.templateLanguage !== undefined && input.templateLanguage !== existing.templateLanguage) isMaterialChange = true;
+    if (input.audienceId !== undefined && input.audienceId !== existing.audienceId) isMaterialChange = true;
+    if (input.audienceType !== undefined && input.audienceType !== existing.audienceType) isMaterialChange = true;
+    if (input.variablesMapping !== undefined && JSON.stringify(input.variablesMapping) !== JSON.stringify(existing.variablesMapping)) isMaterialChange = true;
+    if (input.scheduledAt !== undefined) {
+      const oldTime = existing.scheduledAt ? new Date(existing.scheduledAt).getTime() : null;
+      const newTime = input.scheduledAt ? new Date(input.scheduledAt).getTime() : null;
+      if (oldTime !== newTime) isMaterialChange = true;
+    }
+
     const data: Prisma.CampaignUpdateInput = {};
 
     if (input.name !== undefined) data.name = input.name;
@@ -744,9 +855,40 @@ export class CampaignService {
     if (input.audienceId !== undefined) data.audienceId = input.audienceId;
     if (input.audienceName !== undefined) data.audienceName = input.audienceName;
     data.totalRecipients = totalRecipients;
+
     if (input.scheduledAt !== undefined) {
-      data.scheduledAt = input.scheduledAt ? new Date(input.scheduledAt) : null;
-      data.status = input.scheduledAt ? CampaignStatus.SCHEDULED : CampaignStatus.DRAFT;
+      if (input.scheduledAt) {
+        const scheduledDate = new Date(input.scheduledAt);
+        if (scheduledDate.getTime() < Date.now() + MIN_SCHEDULE_LEAD_MS) {
+          throw new BadRequestError("Scheduled time must be a future timestamp at least 5 minutes ahead.");
+        }
+        data.scheduledAt = scheduledDate;
+        if (!isCurrentlyApproved || isMaterialChange) {
+          data.status = CampaignStatus.DRAFT;
+          (data as any).approvalStatus = CampaignApprovalStatus.PENDING;
+        }
+      } else {
+        data.scheduledAt = null;
+        data.status = CampaignStatus.DRAFT;
+      }
+    }
+
+    if (isResubmittingRejected) {
+      data.status = CampaignStatus.DRAFT;
+      (data as any).approvalStatus = CampaignApprovalStatus.PENDING;
+      (data as any).rejectionReason = null;
+      (data as any).rejectedAt = null;
+      (data as any).rejectedBy = null;
+      (data as any).dispatchRun = ((existing as any).dispatchRun || 1) + 1;
+      await this.cleanupObsoleteCampaignJobs(organizationId, id, "CAMPAIGN_RESUBMITTED");
+    } else if (isCurrentlyApproved && isMaterialChange) {
+      data.status = CampaignStatus.DRAFT;
+      (data as any).approvalStatus = CampaignApprovalStatus.PENDING;
+      (data as any).approvedAt = null;
+      (data as any).approvedBy = null;
+      (data as any).approvalNotes = null;
+      (data as any).dispatchRun = ((existing as any).dispatchRun || 1) + 1;
+      await this.cleanupObsoleteCampaignJobs(organizationId, id, "CAMPAIGN_REVISED");
     }
 
     const updated = await prisma.campaign.update({
@@ -776,8 +918,8 @@ export class CampaignService {
       throw new BadRequestError("Invalid scheduledAt timestamp format. Expected ISO-8601 string.");
     }
 
-    if (scheduledDate.getTime() <= Date.now()) {
-      throw new BadRequestError("Scheduled time must be a future timestamp.");
+    if (scheduledDate.getTime() < Date.now() + MIN_SCHEDULE_LEAD_MS) {
+      throw new BadRequestError("Scheduled time must be a future timestamp at least 5 minutes ahead.");
     }
 
     const existing = await prisma.campaign.findFirst({
@@ -812,15 +954,220 @@ export class CampaignService {
       throw new BadRequestError("Cannot schedule campaign with simulated demo audience. Attach a verified contact list.");
     }
 
+    // Clean up any previously queued messages/jobs if campaign was previously approved/queued
+    await this.cleanupObsoleteCampaignJobs(organizationId, id, "CAMPAIGN_RESCHEDULED");
+
     const updated = await prisma.campaign.update({
       where: { id },
       data: {
         scheduledAt: scheduledDate,
-        status: CampaignStatus.SCHEDULED,
+        status: CampaignStatus.DRAFT,
+        approvalStatus: CampaignApprovalStatus.PENDING as any,
+        approvedAt: null,
+        approvedBy: null,
+        approvalNotes: null,
+        rejectionReason: null,
+        rejectedAt: null,
+        rejectedBy: null,
+        dispatchRun: ((existing as any).dispatchRun || 1) + 1,
       },
     });
 
     return updated;
+  }
+
+  /**
+   * Helper to clean up any obsolete queued WhatsApp messages and BullMQ delayed jobs
+   * when a campaign is revised, rejected, or approval is invalidated.
+   */
+  public async cleanupObsoleteCampaignJobs(
+    organizationId: string,
+    campaignId: string,
+    reason: string
+  ): Promise<void> {
+    const prisma = getPrismaClient();
+    try {
+      if ("whatsAppMessage" in prisma && typeof (prisma as any).whatsAppMessage?.updateMany === "function") {
+        await (prisma as any).whatsAppMessage.updateMany({
+          where: {
+            campaignId,
+            organizationId,
+            status: MessageDeliveryStatus.QUEUED,
+          },
+          data: {
+            status: MessageDeliveryStatus.FAILED,
+            errorCode: reason,
+            errorMessage: `Dispatch cancelled: ${reason}`,
+            isTerminalFailure: true,
+            failedAt: new Date(),
+          },
+        });
+      }
+
+      if (isRedisConfigured() && "whatsAppMessage" in prisma && typeof (prisma as any).whatsAppMessage?.findMany === "function") {
+        const queuedMessages = await (prisma as any).whatsAppMessage.findMany({
+          where: { campaignId, organizationId },
+          select: { id: true },
+        });
+        for (const msg of queuedMessages) {
+          await removeWhatsAppDispatchJob(msg.id);
+        }
+      }
+    } catch (cleanupErr) {
+      logger.warn(
+        `[JobCleanup] Warning cleaning up jobs for campaign ${campaignId}: ${(cleanupErr as Error)?.message}`
+      );
+    }
+  }
+
+  /**
+   * Approves a scheduled campaign for dispatch.
+   * Requires Delegated Admin assigned to the organization, or Master Admin override.
+   */
+  public async approveCampaign(
+    organizationId: string,
+    id: string,
+    reviewerId: string,
+    notes?: string | null
+  ): Promise<unknown> {
+    const prisma = getPrismaClient();
+
+    const existing = await prisma.campaign.findFirst({
+      where: { id, organizationId },
+    });
+
+    if (!existing) {
+      throw new NotFoundError(`Campaign with ID '${id}' not found`);
+    }
+
+    if ((existing as any).approvalStatus === CampaignApprovalStatus.APPROVED) {
+      return existing; // idempotent
+    }
+
+    if ((existing as any).approvalStatus !== CampaignApprovalStatus.PENDING) {
+      throw new BadRequestError(
+        `Cannot approve campaign with approval status '${(existing as any).approvalStatus}'. Only PENDING campaigns can be approved.`
+      );
+    }
+
+    if (!existing.scheduledAt) {
+      throw new BadRequestError("Cannot approve a campaign that does not have a scheduled dispatch timestamp.");
+    }
+
+    // Schedule-time check: Must still be strictly in the future
+    const scheduledTime = new Date(existing.scheduledAt).getTime();
+    if (scheduledTime <= Date.now() + 30000) {
+      throw new BadRequestError(
+        "Scheduled dispatch time has already passed or is within 30 seconds. The customer must choose a new future schedule before approval."
+      );
+    }
+
+    // Validate template is still sendable / APPROVED on Meta
+    const template = await whatsappTemplateService.getTemplateByName(
+      existing.templateName,
+      organizationId
+    );
+    if (!template || !template.isSendable) {
+      throw new BadRequestError(
+        `Template '${existing.templateName}' is not APPROVED on Meta. Campaign cannot be approved.`
+      );
+    }
+
+    // Atomic CAS transition: only update if still PENDING
+    const result = await prisma.campaign.updateMany({
+      where: {
+        id,
+        organizationId,
+        approvalStatus: CampaignApprovalStatus.PENDING as any,
+      },
+      data: {
+        approvalStatus: CampaignApprovalStatus.APPROVED as any,
+        status: CampaignStatus.SCHEDULED,
+        approvedAt: new Date(),
+        approvedBy: reviewerId,
+        approvalNotes: notes || null,
+        rejectionReason: null,
+        rejectedAt: null,
+        rejectedBy: null,
+      },
+    });
+
+    if (result.count === 0) {
+      throw new ConflictError("Campaign state changed concurrently. Please reload and try again.");
+    }
+
+    logger.info(
+      `[CampaignApproval] Campaign ${id} (${existing.name}) approved by ${reviewerId} for org ${organizationId}`
+    );
+
+    return await prisma.campaign.findFirst({ where: { id, organizationId } });
+  }
+
+  /**
+   * Rejects a scheduled campaign with mandatory reason.
+   */
+  public async rejectCampaign(
+    organizationId: string,
+    id: string,
+    reviewerId: string,
+    reason: string
+  ): Promise<unknown> {
+    const prisma = getPrismaClient();
+
+    if (!reason || reason.trim().length < 3) {
+      throw new BadRequestError("A meaningful rejection reason (minimum 3 characters) is required.");
+    }
+
+    const existing = await prisma.campaign.findFirst({
+      where: { id, organizationId },
+    });
+
+    if (!existing) {
+      throw new NotFoundError(`Campaign with ID '${id}' not found`);
+    }
+
+    if (
+      existing.status === CampaignStatus.SENDING ||
+      existing.status === CampaignStatus.COMPLETED
+    ) {
+      throw new BadRequestError(
+        `Cannot reject campaign with status '${existing.status}'. Dispatch has already begun or completed.`
+      );
+    }
+
+    // Atomic CAS transition: only update if PENDING or APPROVED
+    const result = await prisma.campaign.updateMany({
+      where: {
+        id,
+        organizationId,
+        approvalStatus: {
+          in: [CampaignApprovalStatus.PENDING, CampaignApprovalStatus.APPROVED] as any,
+        },
+      },
+      data: {
+        approvalStatus: CampaignApprovalStatus.REJECTED as any,
+        status: CampaignStatus.DRAFT,
+        rejectedAt: new Date(),
+        rejectedBy: reviewerId,
+        rejectionReason: reason.trim(),
+      },
+    });
+
+    if (result.count === 0) {
+      if ((existing as any).approvalStatus === CampaignApprovalStatus.REJECTED) {
+        return existing; // idempotent
+      }
+      throw new ConflictError("Campaign state changed concurrently. Please reload and try again.");
+    }
+
+    // Clean up any pre-enqueued messages/jobs if it was previously approved
+    await this.cleanupObsoleteCampaignJobs(organizationId, id, "CAMPAIGN_REJECTED");
+
+    logger.info(
+      `[CampaignRejection] Campaign ${id} (${existing.name}) rejected by ${reviewerId} for org ${organizationId}: ${reason.trim()}`
+    );
+
+    return await prisma.campaign.findFirst({ where: { id, organizationId } });
   }
 
   /**
@@ -845,7 +1192,6 @@ export class CampaignService {
     }
 
     if (
-      existing.status === CampaignStatus.QUEUED ||
       existing.status === CampaignStatus.SENDING ||
       existing.status === CampaignStatus.COMPLETED
     ) {
@@ -854,15 +1200,81 @@ export class CampaignService {
       );
     }
 
-    const updated = await prisma.campaign.update({
-      where: { id },
+    // If campaign is QUEUED: only allow cancellation if it was pre-enqueued and scheduled dispatch time has not arrived
+    if (existing.status === CampaignStatus.QUEUED) {
+      const now = Date.now();
+      const isPreEnqueuedScheduled =
+        existing.scheduledAt && new Date(existing.scheduledAt).getTime() > now;
+
+      if (!isPreEnqueuedScheduled) {
+        throw new BadRequestError(
+          `Cannot cancel campaign with status '${existing.status}'. Dispatch has already started or completed.`
+        );
+      }
+    }
+
+    // Atomic CAS transition: only cancel if campaign is still in DRAFT, SCHEDULED, or QUEUED
+    const updateResult = await prisma.campaign.updateMany({
+      where: {
+        id,
+        organizationId,
+        status: {
+          in: [CampaignStatus.DRAFT, CampaignStatus.SCHEDULED, CampaignStatus.QUEUED],
+        },
+      },
       data: {
         status: CampaignStatus.CANCELLED,
         completedAt: new Date(),
       },
     });
 
-    return updated;
+    if (updateResult.count === 0) {
+      throw new BadRequestError(
+        `Cannot cancel campaign with status '${existing.status}'. Dispatch has already started or completed.`
+      );
+    }
+
+    // Clean up any pre-enqueued messages and remove delayed BullMQ jobs
+    try {
+      if ("whatsAppMessage" in prisma && typeof (prisma as any).whatsAppMessage?.updateMany === "function") {
+        await (prisma as any).whatsAppMessage.updateMany({
+          where: {
+            campaignId: id,
+            organizationId,
+            status: {
+              in: [MessageDeliveryStatus.QUEUED, MessageDeliveryStatus.SENDING],
+            },
+          },
+          data: {
+            status: MessageDeliveryStatus.FAILED,
+            errorCode: "CAMPAIGN_CANCELLED",
+            errorMessage: "Campaign was cancelled before scheduled dispatch",
+            isTerminalFailure: true,
+            failedAt: new Date(),
+          },
+        });
+      }
+
+      if (isRedisConfigured() && "whatsAppMessage" in prisma && typeof (prisma as any).whatsAppMessage?.findMany === "function") {
+        const queuedMessages = await (prisma as any).whatsAppMessage.findMany({
+          where: { campaignId: id, organizationId },
+          select: { id: true },
+        });
+        for (const msg of queuedMessages) {
+          await removeWhatsAppDispatchJob(msg.id);
+        }
+      }
+    } catch (cleanupErr) {
+      logger.warn(
+        `[CampaignCancel] Cleanup warning for cancelled campaign ${id}: ${(cleanupErr as Error)?.message}`
+      );
+    }
+
+    const updated = await prisma.campaign.findFirst({
+      where: { id, organizationId },
+    });
+
+    return updated || existing;
   }
 
   /**
@@ -982,7 +1394,7 @@ export class CampaignService {
       throw new NotFoundError(`Campaign with ID '${id}' not found`);
     }
 
-    // 2. Validate campaign source status
+    // 2. Validate campaign source status & approval gate
     if (
       campaign.status === CampaignStatus.COMPLETED ||
       campaign.status === CampaignStatus.CANCELLED ||
@@ -991,6 +1403,21 @@ export class CampaignService {
       throw new BadRequestError(
         `Cannot launch campaign with status '${campaign.status}'. Only DRAFT, SCHEDULED, or active campaigns can be launched.`
       );
+    }
+
+    // Approval gate:
+    // Only scheduled campaigns require approval; legitimate Send Now campaigns are approval-exempt.
+    const isApprovalExempt =
+      !campaign.scheduledAt &&
+      ((campaign as any).approvalStatus === CampaignApprovalStatus.NOT_REQUIRED ||
+        !(campaign as any).approvalStatus);
+
+    if (!isApprovalExempt) {
+      if ((campaign as any).approvalStatus !== CampaignApprovalStatus.APPROVED) {
+        throw new ForbiddenError(
+          `Cannot launch campaign '${campaign.name}'. Scheduled campaigns require Delegated Admin approval prior to launch (current approval status: ${(campaign as any).approvalStatus || "PENDING"}).`
+        );
+      }
     }
 
     // 3. Verify template is in testing allowlist, exists, and is APPROVED / sendable on Meta
@@ -1055,7 +1482,7 @@ export class CampaignService {
     }
 
     // 5. Query existing message records for this campaign run to guarantee idempotency
-    const dispatchRun = 1;
+    const dispatchRun = (campaign as any).dispatchRun || 1;
     const existingMessages = await prisma.whatsAppMessage.findMany({
       where: {
         organizationId,
@@ -1282,19 +1709,27 @@ export class CampaignService {
     let enqueueFailureCount = 0;
 
     if (isRedisConfigured()) {
+      const nowMs = Date.now();
+      const targetTime = campaign.scheduledAt ? new Date(campaign.scheduledAt).getTime() : nowMs;
+      const delayMs = Math.max(0, targetTime - nowMs);
+
       for (const msg of messagesToEnqueue) {
         try {
-          const result = await enqueueWhatsAppDispatchJob({
-            messageId: msg.id,
-            organizationId,
-            recipientPhone: msg.recipientPhone,
-            templateName: msg.templateName,
-            templateLanguage: msg.templateLanguage,
-            parameters: msg.parameters,
-            campaignId: campaign.id,
-            contactId: msg.contactId,
-            dispatchRun,
-          });
+          const result = await enqueueWhatsAppDispatchJob(
+            {
+              messageId: msg.id,
+              organizationId,
+              recipientPhone: msg.recipientPhone,
+              templateName: msg.templateName,
+              templateLanguage: msg.templateLanguage,
+              parameters: msg.parameters,
+              campaignId: campaign.id,
+              contactId: msg.contactId,
+              dispatchRun,
+              scheduledAt: campaign.scheduledAt ? campaign.scheduledAt.toISOString() : null,
+            },
+            delayMs > 0 ? { delay: delayMs } : undefined
+          );
           if (result.alreadyExisted) {
             alreadyPreparedCount++;
           } else {
@@ -1415,6 +1850,41 @@ export class CampaignService {
     });
 
     if (messages.length === 0) {
+      if (campaign.status === CampaignStatus.QUEUED) {
+        logger.info(
+          `[CampaignRecovery] Campaign ${campaign.id} (${campaign.name}) is in QUEUED status with 0 message records (crash window recovery). Executing campaign launch to prepare and enqueue messages.`
+        );
+        try {
+          const launchResult = await this.launchCampaign(organizationId, id);
+          return {
+            campaignId: campaign.id,
+            campaignName: campaign.name,
+            status: CampaignStatus.QUEUED,
+            totalPersistedMessages: launchResult.queuedCount,
+            eligibleQueuedCount: launchResult.eligibleCount,
+            enqueuedSuccessCount: launchResult.enqueueSuccessCount,
+            requeuedCount: 0,
+            alreadyEnqueuedCount: launchResult.alreadyPreparedCount,
+            enqueueFailureCount: launchResult.enqueueFailureCount,
+            ambiguousCount: 0,
+            inFlightCount: 0,
+            terminalCount: 0,
+          };
+        } catch (launchErr) {
+          logger.error(
+            `[CampaignRecovery] Failed to recover 0-message QUEUED campaign ${campaign.id}: ${(launchErr as Error)?.message}. Transitioning campaign to FAILED.`
+          );
+          await prisma.campaign.updateMany({
+            where: { id: campaign.id, status: CampaignStatus.QUEUED },
+            data: {
+              status: CampaignStatus.FAILED,
+              completedAt: new Date(),
+            },
+          });
+          throw launchErr;
+        }
+      }
+
       throw new BadRequestError("No messages exist for this campaign. Launch the campaign first.");
     }
 
@@ -1454,6 +1924,7 @@ export class CampaignService {
             campaignId: campaign.id,
             contactId: msg.contactId,
             dispatchRun: msg.dispatchRun,
+            scheduledAt: campaign.scheduledAt ? campaign.scheduledAt.toISOString() : null,
           },
           dbMessage: {
             id: msg.id,
@@ -1509,6 +1980,182 @@ export class CampaignService {
       ambiguousCount,
       terminalCount,
       inFlightCount,
+    };
+  }
+
+  /**
+   * Internal lookup to retrieve a campaign across organizations for platform administrators.
+   * Returns null if not found.
+   */
+  public async getCampaignByIdAcrossOrgs(id: string): Promise<any | null> {
+    const prisma = getPrismaClient();
+    return prisma.campaign.findFirst({
+      where: { id },
+      include: {
+        organization: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            isArchived: true,
+            deletedAt: true,
+          },
+        },
+      },
+    });
+  }
+
+  /**
+   * Lists campaigns subject to the administrative approval workflow across assigned customer organizations.
+   * - Super Admin (allowedOrganizationIds === "ALL"): Queries across all active organizations.
+   * - Delegated Admin (allowedOrganizationIds is string[]): Queries only organizations in allowedOrganizationIds.
+   *   If organizationId is requested and outside allowedOrganizationIds, throws ForbiddenError.
+   */
+  public async listApprovalRequests(params: {
+    allowedOrganizationIds: string[] | "ALL";
+    query: QueryPlatformCampaignApprovalsInput;
+  }): Promise<PlatformCampaignApprovalsResult> {
+    const prisma = getPrismaClient();
+    const {
+      status = "PENDING",
+      organizationId,
+      search,
+      page = 1,
+      limit = 10,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = params.query;
+
+    // 1. Organization boundary enforcement
+    let orgFilter: Prisma.StringFilter | string | undefined;
+
+    if (params.allowedOrganizationIds === "ALL") {
+      if (organizationId) {
+        orgFilter = organizationId;
+      }
+    } else {
+      if (params.allowedOrganizationIds.length === 0) {
+        return {
+          items: [],
+          pagination: {
+            page: 1,
+            limit,
+            total: 0,
+            totalPages: 0,
+            hasNextPage: false,
+            hasPrevPage: false,
+          },
+          counts: { pending: 0, approved: 0, rejected: 0, total: 0 },
+        };
+      }
+
+      if (organizationId) {
+        if (!params.allowedOrganizationIds.includes(organizationId)) {
+          throw new ForbiddenError(
+            "Access denied: You are not assigned to manage this customer organization."
+          );
+        }
+        orgFilter = organizationId;
+      } else {
+        orgFilter = { in: params.allowedOrganizationIds };
+      }
+    }
+
+    // 2. Base where condition
+    const baseWhere: Prisma.CampaignWhereInput = {
+      organization: {
+        isArchived: false,
+        deletedAt: null,
+      },
+    };
+
+    if (orgFilter) {
+      baseWhere.organizationId = orgFilter;
+    }
+
+    if (search && search.trim() !== "") {
+      const searchTrimmed = search.trim();
+      baseWhere.OR = [
+        { name: { contains: searchTrimmed, mode: "insensitive" } },
+        { templateName: { contains: searchTrimmed, mode: "insensitive" } },
+      ];
+    }
+
+    // 3. Status filter for items
+    const where: Prisma.CampaignWhereInput = { ...baseWhere };
+    if (status === "ALL") {
+      where.approvalStatus = {
+        in: [
+          CampaignApprovalStatus.PENDING,
+          CampaignApprovalStatus.APPROVED,
+          CampaignApprovalStatus.REJECTED,
+        ],
+      };
+    } else {
+      where.approvalStatus = status as CampaignApprovalStatus;
+    }
+
+    const skip = (page - 1) * limit;
+
+    // 4. Parallel execution of items query, filtered count, and status counts
+    const [rawItems, total, pendingCount, approvedCount, rejectedCount] =
+      await Promise.all([
+        prisma.campaign.findMany({
+          where,
+          skip,
+          take: limit,
+          orderBy: {
+            [sortBy]: sortOrder,
+          },
+          include: {
+            organization: {
+              select: {
+                id: true,
+                name: true,
+                slug: true,
+              },
+            },
+          },
+        }),
+        prisma.campaign.count({ where }),
+        prisma.campaign.count({
+          where: {
+            ...baseWhere,
+            approvalStatus: CampaignApprovalStatus.PENDING,
+          },
+        }),
+        prisma.campaign.count({
+          where: {
+            ...baseWhere,
+            approvalStatus: CampaignApprovalStatus.APPROVED,
+          },
+        }),
+        prisma.campaign.count({
+          where: {
+            ...baseWhere,
+            approvalStatus: CampaignApprovalStatus.REJECTED,
+          },
+        }),
+      ]);
+
+    const totalPages = Math.ceil(total / limit);
+
+    return {
+      items: rawItems as unknown as PlatformCampaignApprovalItem[],
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+      },
+      counts: {
+        pending: pendingCount,
+        approved: approvedCount,
+        rejected: rejectedCount,
+        total: pendingCount + approvedCount + rejectedCount,
+      },
     };
   }
 }

@@ -1,9 +1,9 @@
-import { CampaignStatus, MessageDeliveryStatus } from "@prisma/client";
+import { CampaignStatus } from "@prisma/client";
 import { getPrismaClient } from "../config/prisma.js";
 import { env } from "../config/env.js";
 import { logger } from "../utils/logger.js";
-import { isWorkerRunning, getWorkerStatus } from "./automaticWorker.service.js";
-import { campaignService } from "./campaign.service.js";
+import { getWorkerStatus } from "./automaticWorker.service.js";
+import { campaignService, CampaignApprovalStatus } from "./campaign.service.js";
 import { DEFAULT_BUSINESS_TIMEZONE } from "../utils/timezone.js";
 
 export interface SchedulerReconciliationResult {
@@ -33,6 +33,8 @@ export interface SchedulerStatusResponse {
   timestamp: string;
 }
 
+export const PRE_ENQUEUE_LEAD_MS = 2 * 60 * 1000; // 2 minutes pre-enqueue window
+
 export class CampaignSchedulerService {
   private timerInstance: NodeJS.Timeout | null = null;
   private isReconciling = false;
@@ -45,7 +47,8 @@ export class CampaignSchedulerService {
    * 2. If automatic dispatch worker is dormant/disabled, campaigns stay safely in SCHEDULED status.
    * 3. Configurable maximum lateness expiry: campaigns that missed their schedule by more than MAX_SCHEDULE_LATENESS_HOURS
    *    are marked as FAILED with an explicit expiry explanation to prevent stale broadcast spam.
-   * 4. Full dispatch pipeline re-validation (consent, suppression, template approval, parameter resolution, phone normalization).
+   * 4. Pre-enqueue lead time: eligible campaigns are pre-enqueued ~2 minutes before scheduledAt with BullMQ delayed jobs.
+   * 5. Full dispatch pipeline re-validation (consent, suppression, template approval, parameter resolution, phone normalization).
    */
   public async reconcileScheduledCampaigns(
     now: Date = new Date()
@@ -61,12 +64,14 @@ export class CampaignSchedulerService {
     };
 
     try {
-      // 1. Query all due or overdue scheduled campaigns
+      // 1. Query all due or pre-enqueue eligible scheduled campaigns (scheduledAt <= now + 2 minutes)
+      const preEnqueueHorizon = new Date(now.getTime() + PRE_ENQUEUE_LEAD_MS);
       const dueCampaigns = await prisma.campaign.findMany({
         where: {
           status: CampaignStatus.SCHEDULED,
+          approvalStatus: CampaignApprovalStatus.APPROVED as any,
           scheduledAt: {
-            lte: now,
+            lte: preEnqueueHorizon,
           },
         },
         orderBy: {
@@ -97,8 +102,8 @@ export class CampaignSchedulerService {
         const scheduledTime = campaign.scheduledAt?.getTime() ?? now.getTime();
         const latenessMs = now.getTime() - scheduledTime;
 
-        // 3a. Maximum Lateness / Expiry Policy Enforcement
-        if (latenessMs > maxLatenessMs) {
+        // 3a. Maximum Lateness / Expiry Policy Enforcement (only if already overdue)
+        if (latenessMs > 0 && latenessMs > maxLatenessMs) {
           logger.warn(
             `[CampaignScheduler] Campaign ${campaign.id} (${campaign.name}) scheduledAt ${campaign.scheduledAt?.toISOString()} exceeded maximum lateness of ${env.MAX_SCHEDULE_LATENESS_HOURS} hours (${Math.round(latenessMs / (1000 * 60 * 60))}h elapsed). Expiring campaign to prevent stale dispatch.`
           );
@@ -123,6 +128,7 @@ export class CampaignSchedulerService {
           where: {
             id: campaign.id,
             status: CampaignStatus.SCHEDULED,
+            approvalStatus: CampaignApprovalStatus.APPROVED as any,
           },
           data: {
             status: CampaignStatus.QUEUED,

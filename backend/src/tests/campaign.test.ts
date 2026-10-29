@@ -395,7 +395,7 @@ describe("Campaign API & Service Layer (/api/v1/campaigns)", () => {
     it("should reject past scheduledAt dates with HTTP 422", async () => {
       const pastDate = new Date(Date.now() - 3600000).toISOString();
       const res = await request(app).post("/api/v1/campaigns").send({
-        name: "Scheduled Campaign",
+        name: "Scheduled Campaign Past",
         templateId: "tpl-1",
         templateName: "template_one",
         scheduledAt: pastDate,
@@ -403,6 +403,66 @@ describe("Campaign API & Service Layer (/api/v1/campaigns)", () => {
 
       expect(res.status).toBe(422);
       expect(res.body.success).toBe(false);
+      expect(JSON.stringify(res.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+    });
+
+    it("should reject scheduledAt dates less than 5 minutes in future (+1m, +4m, +4m59s) with HTTP 422", async () => {
+      // 1 minute ahead
+      const plus1m = new Date(Date.now() + 60 * 1000).toISOString();
+      const res1 = await request(app).post("/api/v1/campaigns").send({
+        name: "Scheduled Campaign +1m",
+        templateId: "tpl-1",
+        templateName: "template_one",
+        scheduledAt: plus1m,
+      });
+      expect(res1.status).toBe(422);
+      expect(JSON.stringify(res1.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+
+      // 4 minutes ahead
+      const plus4m = new Date(Date.now() + 4 * 60 * 1000).toISOString();
+      const res4 = await request(app).post("/api/v1/campaigns").send({
+        name: "Scheduled Campaign +4m",
+        templateId: "tpl-1",
+        templateName: "template_one",
+        scheduledAt: plus4m,
+      });
+      expect(res4.status).toBe(422);
+      expect(JSON.stringify(res4.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+
+      // 4 minutes 59 seconds ahead (below 5-minute boundary)
+      const plus4m59s = new Date(Date.now() + (5 * 60 * 1000 - 1000)).toISOString();
+      const res4m59s = await request(app).post("/api/v1/campaigns").send({
+        name: "Scheduled Campaign +4m59s",
+        templateId: "tpl-1",
+        templateName: "template_one",
+        scheduledAt: plus4m59s,
+      });
+      expect(res4m59s.status).toBe(422);
+      expect(JSON.stringify(res4m59s.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+    });
+
+    it("should accept scheduledAt dates at least 5 minutes in future (+5m, +6m) with HTTP 201", async () => {
+      // 5 minutes ahead (exact safe future boundary + buffer for execution)
+      const plus5m = new Date(Date.now() + 5 * 60 * 1000 + 500).toISOString();
+      const res5 = await request(app).post("/api/v1/campaigns").send({
+        name: "Scheduled Campaign +5m",
+        templateId: "tpl-1",
+        templateName: "template_one",
+        scheduledAt: plus5m,
+      });
+      expect(res5.status).toBe(201);
+      expect(res5.body.success).toBe(true);
+
+      // 6 minutes ahead
+      const plus6m = new Date(Date.now() + 6 * 60 * 1000).toISOString();
+      const res6 = await request(app).post("/api/v1/campaigns").send({
+        name: "Scheduled Campaign +6m",
+        templateId: "tpl-1",
+        templateName: "template_one",
+        scheduledAt: plus6m,
+      });
+      expect(res6.status).toBe(201);
+      expect(res6.body.success).toBe(true);
     });
   });
 
@@ -543,6 +603,98 @@ describe("Campaign API & Service Layer (/api/v1/campaigns)", () => {
 
       expect(res.status).toBe(404);
       expect(res.body.success).toBe(false);
+    });
+
+    it("should reject updating draft with scheduledAt less than 5 minutes ahead (+1m, +4m, +4m59s) with HTTP 422", async () => {
+      const plus1m = new Date(Date.now() + 60 * 1000).toISOString();
+      const res1 = await request(app)
+        .put("/api/v1/campaigns/cmp_seeded_001")
+        .send({ scheduledAt: plus1m });
+      expect(res1.status).toBe(422);
+      expect(JSON.stringify(res1.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+
+      const plus4m = new Date(Date.now() + 4 * 60 * 1000).toISOString();
+      const res4 = await request(app)
+        .put("/api/v1/campaigns/cmp_seeded_001")
+        .send({ scheduledAt: plus4m });
+      expect(res4.status).toBe(422);
+      expect(JSON.stringify(res4.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+
+      const plus4m59s = new Date(Date.now() + (5 * 60 * 1000 - 1000)).toISOString();
+      const res4m59s = await request(app)
+        .put("/api/v1/campaigns/cmp_seeded_001")
+        .send({ scheduledAt: plus4m59s });
+      expect(res4m59s.status).toBe(422);
+      expect(JSON.stringify(res4m59s.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+    });
+
+    it("should accept updating draft with scheduledAt at least 5 minutes ahead (+5m, +6m) with HTTP 200", async () => {
+      const plus5m = new Date(Date.now() + 5 * 60 * 1000 + 500).toISOString();
+      const res5 = await request(app)
+        .put("/api/v1/campaigns/cmp_seeded_001")
+        .send({ scheduledAt: plus5m });
+      expect(res5.status).toBe(200);
+      expect(res5.body.success).toBe(true);
+
+      const plus6m = new Date(Date.now() + 6 * 60 * 1000).toISOString();
+      const res6 = await request(app)
+        .put("/api/v1/campaigns/cmp_seeded_001")
+        .send({ scheduledAt: plus6m });
+      expect(res6.status).toBe(200);
+      expect(res6.body.success).toBe(true);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Explicit Campaign Scheduling Endpoint (/api/v1/campaigns/:id/schedule)
+  // --------------------------------------------------------------------------
+  describe("POST /api/v1/campaigns/:id/schedule (Explicit Schedule)", () => {
+    it("should reject scheduling with lead time less than 5 minutes ahead (+1m, +4m, +4m59s) with HTTP 422", async () => {
+      const plus1m = new Date(Date.now() + 60 * 1000).toISOString();
+      const res1 = await request(app)
+        .post("/api/v1/campaigns/cmp_seeded_001/schedule")
+        .send({ scheduledAt: plus1m });
+      expect(res1.status).toBe(422);
+      expect(JSON.stringify(res1.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+
+      const plus4m = new Date(Date.now() + 4 * 60 * 1000).toISOString();
+      const res4 = await request(app)
+        .post("/api/v1/campaigns/cmp_seeded_001/schedule")
+        .send({ scheduledAt: plus4m });
+      expect(res4.status).toBe(422);
+      expect(JSON.stringify(res4.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+
+      const plus4m59s = new Date(Date.now() + (5 * 60 * 1000 - 1000)).toISOString();
+      const res4m59s = await request(app)
+        .post("/api/v1/campaigns/cmp_seeded_001/schedule")
+        .send({ scheduledAt: plus4m59s });
+      expect(res4m59s.status).toBe(422);
+      expect(JSON.stringify(res4m59s.body.error)).toContain("scheduledAt must be at least 5 minutes in the future");
+    });
+
+    it("should accept scheduling with lead time at least 5 minutes ahead (+5m, +6m) with HTTP 200", async () => {
+      mockCampaignsStore[0].audienceType = "CONTACT_LIST";
+      mockCampaignsStore[0].audienceId = "aud_001";
+      vi.spyOn(whatsappTemplateService, "getTemplateByName").mockResolvedValue({
+        id: "tpl-1",
+        name: "festive_mega_savings",
+        isSendable: true,
+        status: "APPROVED",
+      } as any);
+
+      const plus5m = new Date(Date.now() + 5 * 60 * 1000 + 500).toISOString();
+      const res5 = await request(app)
+        .post("/api/v1/campaigns/cmp_seeded_001/schedule")
+        .send({ scheduledAt: plus5m });
+      expect(res5.status).toBe(200);
+      expect(res5.body.success).toBe(true);
+
+      const plus6m = new Date(Date.now() + 6 * 60 * 1000).toISOString();
+      const res6 = await request(app)
+        .post("/api/v1/campaigns/cmp_seeded_001/schedule")
+        .send({ scheduledAt: plus6m });
+      expect(res6.status).toBe(200);
+      expect(res6.body.success).toBe(true);
     });
   });
 

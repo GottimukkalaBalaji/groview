@@ -1,6 +1,7 @@
 import { getPrismaClient } from "../config/prisma.js";
-import { AppError } from "../utils/errors.js";
+import { AppError, ConflictError } from "../utils/errors.js";
 import { logger } from "../utils/logger.js";
+import { hashPassword } from "../utils/crypto.js";
 import { MetaConfigResolver } from "./metaConfigResolver.js";
 import { whatsappIntegrationService } from "./whatsappIntegration.service.js";
 import { whatsappTemplateService } from "./whatsappTemplate.service.js";
@@ -9,8 +10,11 @@ import {
   PlatformOrganizationsResponse,
   PlatformOrganizationDetail,
   PlatformOrganizationSummary,
+  DelegatedAdminSummary,
 } from "../types/platform.js";
 import { NormalizedWhatsAppTemplate, TemplateSyncSummary } from "../types/template.js";
+import { CreateDelegatedAdminInput } from "../validators/admin.validator.js";
+import crypto from "crypto";
 
 export class PlatformAdminService {
   /**
@@ -19,7 +23,15 @@ export class PlatformAdminService {
   public async getOverview(): Promise<PlatformOverview> {
     const prisma = getPrismaClient();
 
-    // Aggregated organization counts
+    // Aggregated organization counts (excluding internal agency containers directly associated with DELEGATED_ADMIN)
+    const agencyContainerFilter = {
+      users: {
+        none: {
+          platformRole: "DELEGATED_ADMIN" as const,
+        },
+      },
+    };
+
     const [
       totalOrgs,
       activeOrgs,
@@ -30,13 +42,20 @@ export class PlatformAdminService {
       regularUsers,
       connectedMetaAccounts,
     ] = await Promise.all([
-      prisma.organization.count(),
       prisma.organization.count({
-        where: { isArchived: false, deletedAt: null },
+        where: agencyContainerFilter,
+      }),
+      prisma.organization.count({
+        where: {
+          isArchived: false,
+          deletedAt: null,
+          ...agencyContainerFilter,
+        },
       }),
       prisma.organization.count({
         where: {
           OR: [{ isArchived: true }, { deletedAt: { not: null } }],
+          ...agencyContainerFilter,
         },
       }),
       prisma.user.count(),
@@ -116,7 +135,14 @@ export class PlatformAdminService {
     const limit = Math.min(50, Math.max(1, params.limit || 10));
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    // Exclude internal agency containers directly associated with DELEGATED_ADMIN users
+    const where: any = {
+      users: {
+        none: {
+          platformRole: "DELEGATED_ADMIN",
+        },
+      },
+    };
 
     if (params.status === "active") {
       where.isArchived = false;
@@ -438,6 +464,141 @@ export class PlatformAdminService {
         summary: emptySummary,
       };
     }
+  }
+
+  /**
+   * Retrieves all users holding the DELEGATED_ADMIN platform role with their active assignment counts.
+   * Never selects or returns passwordHash or sensitive credentials.
+   */
+  public async getDelegatedAdminsList(): Promise<DelegatedAdminSummary[]> {
+    const prisma = getPrismaClient();
+
+    const admins = await prisma.user.findMany({
+      where: { platformRole: "DELEGATED_ADMIN" },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        platformRole: true,
+        organizationId: true,
+        organization: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+          },
+        },
+        createdAt: true,
+        delegatedAssignments: {
+          where: { status: "ACTIVE" },
+          select: {
+            id: true,
+            organizationId: true,
+            organization: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    return admins.map((admin) => ({
+      id: admin.id,
+      email: admin.email,
+      firstName: admin.firstName,
+      lastName: admin.lastName,
+      platformRole: admin.platformRole,
+      organizationId: admin.organizationId,
+      organizationName: admin.organization?.name,
+      createdAt: admin.createdAt,
+      activeAssignmentsCount: admin.delegatedAssignments.length,
+      assignedOrganizations: admin.delegatedAssignments.map((a) => ({
+        id: a.organizationId,
+        name: a.organization.name,
+      })),
+    }));
+  }
+
+  /**
+   * Creates a new delegated admin account with an isolated administrative container organization.
+   * Enforces server-side DELEGATED_ADMIN role, hashes password via bcrypt (12 rounds),
+   * and prevents duplicate emails atomically within a database transaction.
+   */
+  public async createDelegatedAdmin(
+    input: CreateDelegatedAdminInput
+  ): Promise<DelegatedAdminSummary> {
+    const prisma = getPrismaClient();
+    const normalizedEmail = input.email.trim().toLowerCase();
+
+    // 1. Check for existing user with identical email (case-insensitive)
+    const existing = await prisma.user.findFirst({
+      where: {
+        email: {
+          equals: normalizedEmail,
+          mode: "insensitive",
+        },
+      },
+    });
+
+    if (existing) {
+      throw new ConflictError(
+        "An account with this email address already exists. Please choose a different email."
+      );
+    }
+
+    // 2. Hash the chosen password using the existing bcrypt 12-round helper
+    const passwordHash = await hashPassword(input.password);
+
+    // 3. Generate safe unique organization name & slug for isolated administrative container
+    const cleanFirstName = input.firstName.trim();
+    const cleanLastName = input.lastName?.trim() || "";
+    const fullName = `${cleanFirstName}${cleanLastName ? ` ${cleanLastName}` : ""}`;
+    const orgName = `${fullName}'s Agency`.slice(0, 100);
+    const orgSlug = `agency-${crypto.randomBytes(4).toString("hex")}`;
+
+    // 4. Atomically provision the isolated container and the delegated admin user
+    const result = await prisma.$transaction(async (tx) => {
+      // Create isolated administrative organization container
+      const organization = await tx.organization.create({
+        data: {
+          name: orgName,
+          slug: orgSlug,
+        },
+      });
+
+      // Create User with server-enforced DELEGATED_ADMIN platform role
+      const user = await tx.user.create({
+        data: {
+          organizationId: organization.id,
+          email: normalizedEmail,
+          passwordHash,
+          firstName: cleanFirstName,
+          lastName: cleanLastName || null,
+          role: "ADMIN",
+          platformRole: "DELEGATED_ADMIN",
+        },
+      });
+
+      return { user, organization };
+    });
+
+    return {
+      id: result.user.id,
+      email: result.user.email,
+      firstName: result.user.firstName,
+      lastName: result.user.lastName,
+      platformRole: result.user.platformRole,
+      organizationId: result.organization.id,
+      organizationName: result.organization.name,
+      activeAssignmentsCount: 0,
+      assignedOrganizations: [],
+      createdAt: result.user.createdAt,
+    };
   }
 }
 

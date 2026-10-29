@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MasterAdminPage } from "../pages/MasterAdminPage.js";
-import { apiClient } from "../services/api.js";
+import { apiClient, ApiClientError } from "../services/api.js";
 
 // Mock the AuthContext so the page evaluates as PLATFORM_MASTER_ADMIN
 vi.mock("../context/AuthContext.js", () => ({
@@ -353,6 +353,207 @@ describe("Step 4 — Master Admin Business Assignments UI", () => {
           within(dialog).getByText(/already has an active delegated administrator assignment/i)
         ).toBeDefined();
       });
+    });
+
+    it("does not issue API request and displays validation error when no organization is selected", async () => {
+      const createSpy = vi.spyOn(apiClient, "createPlatformAssignment");
+
+      render(<MasterAdminPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: /Business Assignments/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Assign Business" })).not.toBeDisabled();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Assign Business" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i })).toBeDefined();
+      });
+
+      const dialog = screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i });
+
+      // Select admin only, leave organization unselected
+      const adminSelect = within(dialog).getByLabelText(/Delegated Administrator/i);
+      fireEvent.change(adminSelect, { target: { value: "usr_del_1" } });
+
+      const submitBtn = within(dialog).getByRole("button", { name: "Assign Business" });
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(within(dialog).getByText("Please select a target organization.")).toBeDefined();
+        expect(createSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("does not issue API request and displays validation error when no delegated admin is selected", async () => {
+      const createSpy = vi.spyOn(apiClient, "createPlatformAssignment");
+
+      render(<MasterAdminPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: /Business Assignments/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Assign Business" })).not.toBeDisabled();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Assign Business" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i })).toBeDefined();
+      });
+
+      const dialog = screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i });
+
+      // Select organization only, leave admin unselected
+      const orgSelect = within(dialog).getByLabelText(/Target Customer Organization/i);
+      fireEvent.change(orgSelect, { target: { value: "org_alpha_123" } });
+
+      const submitBtn = within(dialog).getByRole("button", { name: "Assign Business" });
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(within(dialog).getByText("Please select a delegated administrator.")).toBeDefined();
+        expect(createSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    it("displays structured 422 validation error details cleanly when backend rejects invalid body", async () => {
+      vi.spyOn(apiClient, "createPlatformAssignment").mockRejectedValueOnce(
+        new ApiClientError("Validation failed", 422, "VALIDATION_ERROR", [
+          { field: "organizationId", message: "Organization ID is required" },
+        ])
+      );
+
+      render(<MasterAdminPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: /Business Assignments/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Assign Business" })).not.toBeDisabled();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Assign Business" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i })).toBeDefined();
+      });
+
+      const dialog = screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i });
+
+      const orgSelect = within(dialog).getByLabelText(/Target Customer Organization/i);
+      fireEvent.change(orgSelect, { target: { value: "org_alpha_123" } });
+
+      const adminSelect = within(dialog).getByLabelText(/Delegated Administrator/i);
+      fireEvent.change(adminSelect, { target: { value: "usr_del_1" } });
+
+      const submitBtn = within(dialog).getByRole("button", { name: "Assign Business" });
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(within(dialog).getByText("Organization ID is required")).toBeDefined();
+      });
+    });
+
+    it("clears stale validation/API error banner when selected organization changes", async () => {
+      const createSpy = vi.spyOn(apiClient, "createPlatformAssignment").mockRejectedValueOnce(
+        new ApiClientError("Validation failed", 422, "VALIDATION_ERROR", [
+          { field: "organizationId", message: "Organization ID is required" },
+        ])
+      );
+
+      render(<MasterAdminPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: /Business Assignments/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Assign Business" })).not.toBeDisabled();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Assign Business" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i })).toBeDefined();
+      });
+
+      const dialog = screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i });
+
+      const orgSelect = within(dialog).getByLabelText(/Target Customer Organization/i) as HTMLSelectElement;
+      fireEvent.change(orgSelect, { target: { value: "org_alpha_123" } });
+
+      const adminSelect = within(dialog).getByLabelText(/Delegated Administrator/i) as HTMLSelectElement;
+      fireEvent.change(adminSelect, { target: { value: "usr_del_1" } });
+
+      const submitBtn = within(dialog).getByRole("button", { name: "Assign Business" });
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(within(dialog).getByText("Organization ID is required")).toBeDefined();
+      });
+
+      // Change organization selection: stale error banner must disappear immediately
+      fireEvent.change(orgSelect, { target: { value: "org_gamma_789" } });
+      expect(within(dialog).queryByText("Organization ID is required")).toBeNull();
+      expect(orgSelect.value).toBe("org_gamma_789");
+
+      // Verify valid selection submits properly with correct organizationId and userId
+      createSpy.mockResolvedValueOnce({
+        success: true,
+        timestamp: "2026-10-18T10:00:00.000Z",
+        data: {
+          ...mockAssignmentsList[0],
+          id: "asgn_new_101",
+          organizationId: "org_gamma_789",
+          userId: "usr_del_1",
+        },
+      });
+
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(createSpy).toHaveBeenCalledWith({
+          organizationId: "org_gamma_789",
+          userId: "usr_del_1",
+          assignmentReason: undefined,
+        });
+      });
+    });
+
+    it("clears error banner when delegated administrator dropdown changes", async () => {
+      render(<MasterAdminPage />);
+
+      fireEvent.click(screen.getByRole("button", { name: /Business Assignments/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Assign Business" })).not.toBeDisabled();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Assign Business" }));
+
+      await waitFor(() => {
+        expect(screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i })).toBeDefined();
+      });
+
+      const dialog = screen.getByRole("dialog", { name: /Assign Organization to Delegated Administrator/i });
+
+      // Trigger client validation error by leaving admin unselected
+      const orgSelect = within(dialog).getByLabelText(/Target Customer Organization/i) as HTMLSelectElement;
+      fireEvent.change(orgSelect, { target: { value: "org_alpha_123" } });
+
+      const submitBtn = within(dialog).getByRole("button", { name: "Assign Business" });
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(within(dialog).getByText("Please select a delegated administrator.")).toBeDefined();
+      });
+
+      // Changing admin selection clears the error banner
+      const adminSelect = within(dialog).getByLabelText(/Delegated Administrator/i) as HTMLSelectElement;
+      fireEvent.change(adminSelect, { target: { value: "usr_del_2" } });
+
+      expect(within(dialog).queryByText("Please select a delegated administrator.")).toBeNull();
+      expect(adminSelect.value).toBe("usr_del_2");
     });
   });
 

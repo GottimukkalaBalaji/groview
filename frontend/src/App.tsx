@@ -9,12 +9,13 @@ import { AudiencesPage } from "./pages/AudiencesPage.js";
 import { AnalyticsPage } from "./pages/AnalyticsPage.js";
 import { SettingsPage } from "./pages/SettingsPage.js";
 import { MasterAdminPage } from "./pages/MasterAdminPage.js";
+import { PosterEditorPage } from "./pages/PosterEditorPage.js";
 import { AuthPage } from "./pages/AuthPage.js";
 import { AuthProvider, useAuth } from "./context/AuthContext.js";
 import { Sparkles, Loader2 } from "lucide-react";
 
 const AppContent: React.FC = () => {
-  const { isAuthenticated, isLoading, platformCapabilities } = useAuth();
+  const { isAuthenticated, isLoading, platformCapabilities, user } = useAuth();
   const [currentView, setCurrentView] = useState<string>("dashboard");
   const [isMobileNavOpen, setIsMobileNavOpen] = useState<boolean>(false);
 
@@ -66,6 +67,11 @@ const AppContent: React.FC = () => {
         return {
           title: "Integration Settings",
         };
+      case "poster-editor":
+        return {
+          title: "Poster Studio",
+          badge: "Creative Studio",
+        };
       case "master-admin":
         return {
           title: "Master Admin",
@@ -86,8 +92,10 @@ const AppContent: React.FC = () => {
         return <DashboardPage onNavigate={(view) => setCurrentView(view)} />;
       case "templates":
         return <TemplatesPage />;
+      case "poster-editor":
+        return <PosterEditorPage currentUser={user} />;
       case "campaigns":
-        return <CampaignsPage />;
+        return <CampaignsPage currentUser={user} />;
       case "contacts":
         return <AudiencesPage />;
       case "analytics":

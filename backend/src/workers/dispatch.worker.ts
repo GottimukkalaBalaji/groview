@@ -1,6 +1,6 @@
 import crypto from "crypto";
-import { Worker, Job } from "bullmq";
-import { MessageDeliveryStatus } from "@prisma/client";
+import { Worker, Job, DelayedError } from "bullmq";
+import { MessageDeliveryStatus, CampaignStatus } from "@prisma/client";
 import { getBullMQRedisOptions, isRedisConfigured } from "../config/redis.js";
 import { getPrismaClient } from "../config/prisma.js";
 import { logger } from "../utils/logger.js";
@@ -21,6 +21,10 @@ export interface ProcessDispatchMessageInput {
   contactId?: string | null;
   jobId?: string;
   workerId?: string;
+  job?: Job<WhatsAppDispatchJobData>;
+  token?: string;
+  dispatchRun?: number;
+  scheduledAt?: string | Date | null;
 }
 
 export interface DispatchJobResult {
@@ -46,12 +50,139 @@ export interface DispatchJobResult {
 export async function processDispatchMessage(
   input: ProcessDispatchMessageInput
 ): Promise<DispatchJobResult> {
-  const { messageId, organizationId, campaignId, contactId } = input;
+  const { messageId, organizationId, campaignId, contactId, token } = input;
   const workerId =
     input.workerId || `worker_${process.pid}_${crypto.randomBytes(4).toString("hex")}`;
   const prisma = getPrismaClient();
 
   logger.info(`[${workerId}] Processing dispatch message ${messageId} (job: ${input.jobId || "direct"})`);
+
+  // 0. Campaign Scheduled-Time & Cancellation Guard:
+  // Strictly prevent early dispatch before scheduledAt and abort cancelled/completed campaigns
+  if (campaignId) {
+    let campaign: any = null;
+    try {
+      campaign = await prisma.campaign.findFirst({
+        where: { id: campaignId, organizationId },
+        select: { id: true, status: true, scheduledAt: true, approvalStatus: true, dispatchRun: true } as any,
+      });
+    } catch (err) {
+      logger.warn(`[${workerId}] Failed to query campaign ${campaignId} for schedule check: ${(err as Error).message}`);
+    }
+
+    if (campaign) {
+      if (campaign.status === "CANCELLED" || campaign.status === "COMPLETED") {
+        logger.warn(
+          `[${workerId}] Campaign ${campaignId} is in terminal/cancelled status (${campaign.status}). Skipping dispatch.`
+        );
+        return { success: false, skipped: true, reason: `CAMPAIGN_${campaign.status}` };
+      }
+
+      // Check approval status for scheduled campaigns
+      const isApprovalExempt =
+        !campaign.scheduledAt &&
+        ((campaign as any).approvalStatus === "NOT_REQUIRED" || !(campaign as any).approvalStatus);
+
+      if (!isApprovalExempt && (campaign as any).approvalStatus !== "APPROVED") {
+        logger.warn(
+          `[${workerId}] Campaign ${campaignId} is not approved for dispatch (${(campaign as any).approvalStatus}). Discarding delayed job.`
+        );
+        await prisma.whatsAppMessage.updateMany({
+          where: { id: messageId, status: MessageDeliveryStatus.QUEUED },
+          data: {
+            status: MessageDeliveryStatus.FAILED,
+            errorCode: "CAMPAIGN_NOT_APPROVED",
+            errorMessage: `Dispatch blocked: Campaign approval status is ${(campaign as any).approvalStatus || "PENDING"}`,
+            isTerminalFailure: true,
+            failedAt: new Date(),
+          },
+        });
+        if (campaignId) {
+          await CampaignLifecycleService.evaluateCampaignLifecycle(campaignId);
+        }
+        return { success: false, skipped: true, reason: "CAMPAIGN_NOT_APPROVED" };
+      }
+
+      // Check revision / dispatchRun integrity:
+      if (input.dispatchRun && (campaign as any).dispatchRun && input.dispatchRun !== (campaign as any).dispatchRun) {
+        logger.warn(
+          `[${workerId}] Stale job revision mismatch: job run ${input.dispatchRun} does not match campaign run ${(campaign as any).dispatchRun}. Discarding stale job.`
+        );
+        await prisma.whatsAppMessage.updateMany({
+          where: { id: messageId, status: MessageDeliveryStatus.QUEUED },
+          data: {
+            status: MessageDeliveryStatus.FAILED,
+            errorCode: "STALE_JOB_REVISION_MISMATCH",
+            errorMessage: `Job revision (${input.dispatchRun}) does not match current approved campaign revision (${(campaign as any).dispatchRun})`,
+            isTerminalFailure: true,
+            failedAt: new Date(),
+          },
+        });
+        if (campaignId) {
+          await CampaignLifecycleService.evaluateCampaignLifecycle(campaignId);
+        }
+        return { success: false, skipped: true, reason: "STALE_JOB_REVISION_MISMATCH" };
+      }
+
+      // Check schedule timestamp integrity:
+      if (
+        input.scheduledAt &&
+        campaign.scheduledAt &&
+        new Date(input.scheduledAt).getTime() !== new Date(campaign.scheduledAt).getTime()
+      ) {
+        logger.warn(
+          `[${workerId}] Stale job schedule mismatch: job scheduledAt ${input.scheduledAt} does not match campaign ${campaign.scheduledAt.toISOString()}. Discarding stale job.`
+        );
+        await prisma.whatsAppMessage.updateMany({
+          where: { id: messageId, status: MessageDeliveryStatus.QUEUED },
+          data: {
+            status: MessageDeliveryStatus.FAILED,
+            errorCode: "STALE_JOB_SCHEDULE_MISMATCH",
+            errorMessage: "Job scheduled time does not match current approved campaign schedule",
+            isTerminalFailure: true,
+            failedAt: new Date(),
+          },
+        });
+        if (campaignId) {
+          await CampaignLifecycleService.evaluateCampaignLifecycle(campaignId);
+        }
+        return { success: false, skipped: true, reason: "STALE_JOB_SCHEDULE_MISMATCH" };
+      }
+
+      if (campaign.scheduledAt) {
+        const scheduledTime = new Date(campaign.scheduledAt).getTime();
+        const now = Date.now();
+        const earlyDiff = scheduledTime - now;
+
+        if (earlyDiff > 0) {
+          if (earlyDiff <= 3000) {
+            logger.info(
+              `[${workerId}] Message ${messageId} arrived ${earlyDiff}ms early before scheduledAt. Awaiting exact scheduled second.`
+            );
+            await new Promise((resolve) => setTimeout(resolve, earlyDiff));
+          } else {
+            logger.warn(
+              `[${workerId}] Message ${messageId} arrived ${earlyDiff}ms early before scheduledAt (${campaign.scheduledAt.toISOString()}). Deferring BullMQ job.`
+            );
+            if (input.job && typeof input.job.moveToDelayed === "function") {
+              try {
+                await input.job.moveToDelayed(scheduledTime, token);
+                throw new DelayedError();
+              } catch (err) {
+                if (err instanceof DelayedError) throw err;
+                logger.warn(`[${workerId}] Failed to moveToDelayed: ${(err as Error).message}`);
+              }
+            }
+            return {
+              success: false,
+              skipped: true,
+              reason: "DEFERRED_UNTIL_SCHEDULED_TIME",
+            };
+          }
+        }
+      }
+    }
+  }
 
   // 1. Atomic Lease Claim: Guard against dual-dispatch or expired worker takeover
   // If status was QUEUED -> transition to SENDING and proceed to dispatch
@@ -198,6 +329,61 @@ export async function processDispatchMessage(
     return { success: false, terminal: true, reason: msg, errorCode: errCode };
   }
 
+  // 3b. Final Cancellation & Terminal Status Interlock Gate immediately before external Meta send
+  if (campaignId) {
+    let latestCampaign = null;
+    try {
+      latestCampaign = await prisma.campaign.findFirst({
+        where: { id: campaignId, organizationId },
+        select: { status: true },
+      });
+    } catch (err) {
+      logger.warn(`[${workerId}] Failed to verify latest campaign status for ${campaignId}: ${(err as Error).message}`);
+    }
+
+    if (
+      latestCampaign?.status === CampaignStatus.CANCELLED ||
+      latestCampaign?.status === CampaignStatus.COMPLETED ||
+      latestCampaign?.status === CampaignStatus.FAILED
+    ) {
+      logger.warn(
+        `[${workerId}] Campaign ${campaignId} transitioned to terminal status (${latestCampaign.status}) before external dispatch for message ${messageId}. Aborting external send.`
+      );
+
+      await prisma.whatsAppMessage.update({
+        where: { id: messageId },
+        data: {
+          status: MessageDeliveryStatus.FAILED,
+          errorCode: "CAMPAIGN_CANCELLED",
+          errorMessage: `Campaign was marked ${latestCampaign.status} before external dispatch`,
+          isTerminalFailure: true,
+          failedAt: new Date(),
+        },
+      });
+
+      await CampaignLifecycleService.evaluateCampaignLifecycle(campaignId);
+      return { success: false, skipped: true, reason: `CAMPAIGN_${latestCampaign.status}` };
+    }
+  }
+
+  // Also verify this specific message row was not terminated concurrently by cancellation
+  let currentMsg = null;
+  try {
+    currentMsg = await prisma.whatsAppMessage.findUnique({
+      where: { id: messageId },
+      select: { status: true },
+    });
+  } catch (err) {
+    logger.warn(`[${workerId}] Failed to verify message ${messageId} status before send: ${(err as Error).message}`);
+  }
+
+  if (currentMsg && currentMsg.status !== MessageDeliveryStatus.SENDING) {
+    logger.warn(
+      `[${workerId}] Message ${messageId} is in status '${currentMsg.status}' (not SENDING) before Meta dispatch. Aborting external send.`
+    );
+    return { success: false, skipped: true, reason: `MESSAGE_STATUS_${currentMsg.status}` };
+  }
+
   // 4. Dispatch to Meta Graph API using resolved tenant credentials
   const dispatchResult = await WhatsAppSendService.executeMetaSend({
     recipientPhone: claimedMessage.recipientPhone,
@@ -298,7 +484,7 @@ export function createDispatchWorker(customWorkerId?: string): Worker<WhatsAppDi
 
   const worker = new Worker<WhatsAppDispatchJobData>(
     WHATSAPP_DISPATCH_QUEUE_NAME,
-    async (job: Job<WhatsAppDispatchJobData>) => {
+    async (job: Job<WhatsAppDispatchJobData>, token?: string) => {
       return processDispatchMessage({
         messageId: job.data.messageId,
         organizationId: job.data.organizationId,
@@ -306,6 +492,10 @@ export function createDispatchWorker(customWorkerId?: string): Worker<WhatsAppDi
         contactId: job.data.contactId,
         jobId: job.id,
         workerId,
+        job,
+        token,
+        dispatchRun: (job.data as any).dispatchRun,
+        scheduledAt: (job.data as any).scheduledAt,
       });
     },
     {
